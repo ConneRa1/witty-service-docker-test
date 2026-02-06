@@ -5,6 +5,7 @@ import {
   isMessageEvent,
   isAgentErrorEvent,
   isConversationStateUpdateEvent,
+  isOpenReviewEvent,
 } from "#/types/v1/type-guards";
 
 export const shouldRenderEvent = (event: OpenHandsEvent) => {
@@ -42,6 +43,11 @@ export const shouldRenderEvent = (event: OpenHandsEvent) => {
 
   // Render agent error events
   if (isAgentErrorEvent(event)) {
+    return true;
+  }
+
+  // Render open review events (web service preview buttons)
+  if (isOpenReviewEvent(event)) {
     return true;
   }
 

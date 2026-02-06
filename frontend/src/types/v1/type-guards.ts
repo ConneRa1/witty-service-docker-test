@@ -21,6 +21,7 @@ import {
   ConversationErrorEvent,
 } from "./core/events/conversation-state-event";
 import { SystemPromptEvent } from "./core/events/system-event";
+import { OpenReviewEvent } from "./core/events/review-event";
 import type { OpenHandsParsedEvent } from "../core/index";
 
 /**
@@ -190,6 +191,15 @@ export const isConversationErrorEvent = (
   event: OpenHandsEvent,
 ): event is ConversationErrorEvent =>
   "kind" in event && event.kind === "ConversationErrorEvent";
+
+/**
+ * Type guard function to check if an event is an open review event
+ */
+export const isOpenReviewEvent = (
+  event: OpenHandsEvent,
+): event is OpenReviewEvent =>
+  "kind" in event &&
+  (event.kind === "OpenReviewEvent" || event.kind === "open_review_event");
 
 // =============================================================================
 // TEMPORARY COMPATIBILITY TYPE GUARDS

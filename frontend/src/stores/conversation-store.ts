@@ -16,6 +16,13 @@ export interface IMessageToSend {
   timestamp: number;
 }
 
+export interface ServedPreview {
+  url: string;
+  port: number;
+  serviceName: string;
+  requestId: number;
+}
+
 interface ConversationState {
   isRightPanelShown: boolean;
   selectedTab: ConversationTab | null;
@@ -31,6 +38,7 @@ interface ConversationState {
   planContent: string | null;
   conversationMode: ConversationMode;
   subConversationTaskId: string | null; // Task ID for sub-conversation creation
+  servedPreview: ServedPreview | null;
 }
 
 interface ConversationActions {
@@ -57,6 +65,7 @@ interface ConversationActions {
   setConversationMode: (conversationMode: ConversationMode) => void;
   setSubConversationTaskId: (taskId: string | null) => void;
   setPlanContent: (planContent: string | null) => void;
+  setServedPreview: (servedPreview: ServedPreview) => void;
 }
 
 type ConversationStore = ConversationState & ConversationActions;
@@ -123,6 +132,7 @@ export const useConversationStore = create<ConversationStore>()(
       planContent: null,
       conversationMode: "code",
       subConversationTaskId: null,
+      servedPreview: null,
 
       // Actions
       setIsRightPanelShown: (isRightPanelShown) =>
@@ -260,6 +270,7 @@ export const useConversationStore = create<ConversationStore>()(
             conversationMode: "code",
             subConversationTaskId: null,
             planContent: null,
+            servedPreview: null,
           },
           false,
           "resetConversationState",
@@ -276,6 +287,9 @@ export const useConversationStore = create<ConversationStore>()(
 
       setPlanContent: (planContent) =>
         set({ planContent }, false, "setPlanContent"),
+
+      setServedPreview: (servedPreview) =>
+        set({ servedPreview }, false, "setServedPreview"),
     }),
     {
       name: "conversation-store",

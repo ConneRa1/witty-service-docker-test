@@ -1,4 +1,6 @@
 import React from "react";
+import { FaExternalLinkAlt } from "react-icons/fa";
+import { useTranslation } from "react-i18next";
 import { OpenHandsEvent, MessageEvent, ActionEvent } from "#/types/v1/core";
 import { FinishAction } from "#/types/v1/core/base/action";
 import {
@@ -6,9 +8,14 @@ import {
   isObservationEvent,
   isAgentErrorEvent,
   isUserMessageEvent,
+  isOpenReviewEvent,
 } from "#/types/v1/type-guards";
 import { MicroagentStatus } from "#/types/microagent-status";
 import { useConfig } from "#/hooks/query/use-config";
+import { useConversationStore } from "#/stores/conversation-store";
+import { useBatchSandboxes } from "#/hooks/query/use-batch-sandboxes";
+import { useConversationConfig } from "#/hooks/query/use-conversation-config";
+import { I18nKey } from "#/i18n/declaration";
 // TODO: Implement V1 feedback functionality when API supports V1 event IDs
 // import { useFeedbackExists } from "#/hooks/query/use-feedback-exists";
 import {
@@ -71,6 +78,88 @@ const shouldShowSkillReadyEvent = (messageEvent: MessageEvent): boolean => {
 
   return hasActivatedSkills && hasExtendedContent;
 };
+
+/**
+ * Service preview button component
+ */
+interface ServicePreviewButtonProps {
+  port: number;
+  serviceName: string;
+  path?: string;
+}
+
+function ServicePreviewButton({
+  port,
+  serviceName,
+  path,
+}: ServicePreviewButtonProps) {
+  const { t } = useTranslation();
+  const { data: conversationConfig } = useConversationConfig();
+  const sandboxId = conversationConfig?.runtime_id;
+  const sandboxesQuery = useBatchSandboxes(sandboxId ? [sandboxId] : []);
+  const { setIsRightPanelShown, setSelectedTab, setServedPreview } =
+    useConversationStore();
+
+  const handleClick = () => {
+    // Get sandbox data
+    const sandbox =
+      sandboxesQuery.data && sandboxesQuery.data.length > 0
+        ? sandboxesQuery.data[0]
+        : null;
+
+    let previewUrl: string;
+
+    if (sandbox?.exposed_urls && sandbox.exposed_urls.length > 0) {
+      // Docker mode: Find the exposed URL for this port
+      // Map port to worker name (8011 -> WORKER_1, 8012 -> WORKER_2, etc.)
+      const workerName = `WORKER_${port - 8010}`;
+      const exposedUrl = sandbox.exposed_urls.find(
+        (url: { name: string }) => url.name === workerName,
+      );
+
+      if (exposedUrl) {
+        previewUrl = exposedUrl.url;
+      } else {
+        // Fallback: construct localhost URL
+        previewUrl = `http://localhost:${port}`;
+      }
+    } else {
+      // Local mode: Use localhost URL
+      previewUrl = `http://localhost:${port}`;
+    }
+
+    const previewPath = path?.trim();
+    if (previewPath) {
+      try {
+        previewUrl = new URL(previewPath, previewUrl).toString();
+      } catch {
+        // Keep the original previewUrl if path parsing fails.
+      }
+    }
+
+    setServedPreview({
+      url: previewUrl,
+      port,
+      serviceName,
+      requestId: Date.now(),
+    });
+
+    // Open ServedApp panel
+    setIsRightPanelShown(true);
+    setSelectedTab("served");
+  };
+
+  return (
+    <button
+      onClick={handleClick}
+      className="flex items-center gap-2 px-3 py-1.5 bg-blue-500 hover:bg-blue-600 text-white rounded-md text-sm transition-colors mt-2"
+      type="button"
+    >
+      <FaExternalLinkAlt className="w-4 h-4" />
+      {t(I18nKey.SERVED_APP$PREVIEW_BUTTON, { name: serviceName })}
+    </button>
+  );
+}
 
 interface CommonProps {
   microagentStatus?: MicroagentStatus | null;
@@ -145,6 +234,7 @@ export function EventMessage({
   isInLast10Actions,
 }: EventMessageProps) {
   const { data: config } = useConfig();
+  const { t } = useTranslation();
 
   // V1 events use string IDs, but useFeedbackExists expects number
   // For now, we'll skip feedback functionality for V1 events
@@ -171,6 +261,23 @@ export function EventMessage({
   // Agent error events
   if (isAgentErrorEvent(event)) {
     return <ErrorEventMessage event={event} {...commonProps} />;
+  }
+
+  // Open review events - show preview button
+  if (isOpenReviewEvent(event)) {
+    const { port, name, description, path } = event;
+
+    return (
+      <div className="flex flex-col gap-2">
+        <div className="text-sm text-gray-400">
+          {t(I18nKey.SERVED_APP$PREVIEW_MESSAGE, {
+            name,
+            description: description ? ` (${description})` : "",
+          })}
+        </div>
+        <ServicePreviewButton port={port} serviceName={name} path={path} />
+      </div>
+    );
   }
 
   // Finish actions

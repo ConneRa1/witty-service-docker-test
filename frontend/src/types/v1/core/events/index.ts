@@ -5,4 +5,5 @@ export * from "./conversation-state-event";
 export * from "./message-event";
 export * from "./observation-event";
 export * from "./pause-event";
+export * from "./review-event";
 export * from "./system-event";
