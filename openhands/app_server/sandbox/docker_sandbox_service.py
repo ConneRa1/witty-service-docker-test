@@ -39,7 +39,7 @@ from openhands.app_server.utils.docker_utils import (
 _logger = logging.getLogger(__name__)
 SESSION_API_KEY_VARIABLE = 'OH_SESSION_API_KEYS_0'
 WEBHOOK_CALLBACK_VARIABLE = 'OH_WEBHOOKS_0_BASE_URL'
-STARTUP_GRACE_SECONDS = 15
+STARTUP_GRACE_SECONDS = 30
 
 
 class VolumeMount(BaseModel):
