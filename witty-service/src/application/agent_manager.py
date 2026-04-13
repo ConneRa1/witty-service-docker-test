@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Protocol
 from uuid import uuid4
 
+from src.adapter.http_client import AdaptorHttpClient
 from src.adapter.websocket_client_pool import AdaptorEndpoint, WebSocketClientPool
 from src.adapter.websocket_protocol import OutboundMessage
 from src.adapter.websocket_client import WebSocketClient
@@ -269,8 +270,12 @@ class AgentManager:
         agent_id: str,
         session_id: str,
         content: str,
+        adaptor_client: AdaptorHttpClient | None = None,
     ) -> dict[str, Any]:
         agent = self._get_agent(agent_id)
+
+        if adaptor_client is None:
+            adaptor_client = self._get_adaptor_http_client(agent_id)
 
         if agent.status is AgentStatus.paused:
             agent = self.resume_agent(agent_id)
@@ -358,6 +363,44 @@ class AgentManager:
             }
             if event_dict["type"] == "message.completed":
                 break
+
+    async def create_session(self, agent_id: str) -> SessionRecord:
+        agent = self._get_agent(agent_id)
+        if agent.status is not AgentStatus.running:
+            raise DomainError(
+                code=AGENT_NOT_RUNNING,
+                message="Agent must be running to create session.",
+                details={"agent_id": agent_id, "status": agent.status.value},
+            )
+
+        adaptor_client = self._get_adaptor_http_client(agent_id)
+        try:
+            session = await self._session_manager.create_session_remote(agent_id, adaptor_client)
+        finally:
+            await adaptor_client.close()
+
+        return session
+
+    async def list_sessions(self, agent_id: str) -> list[SessionRecord]:
+        adaptor_client = self._get_adaptor_http_client(agent_id)
+        try:
+            return await self._session_manager.list_sessions_remote(agent_id, adaptor_client)
+        finally:
+            await adaptor_client.close()
+
+    async def get_session(self, agent_id: str, session_id: str) -> SessionRecord:
+        adaptor_client = self._get_adaptor_http_client(agent_id)
+        try:
+            return await self._session_manager.get_session_remote(agent_id, session_id, adaptor_client)
+        finally:
+            await adaptor_client.close()
+
+    async def delete_session(self, agent_id: str, session_id: str) -> None:
+        adaptor_client = self._get_adaptor_http_client(agent_id)
+        try:
+            await self._session_manager.delete_session_remote(session_id, adaptor_client)
+        finally:
+            await adaptor_client.close()
 
     def delete_agent(self, agent_id: str) -> None:
         agent = self._get_agent(agent_id)
@@ -472,6 +515,11 @@ class AgentManager:
                 details={"agent_id": agent_id},
             )
         return sandbox_state
+
+    def _get_adaptor_http_client(self, agent_id: str) -> AdaptorHttpClient:
+        """获取到 witty-agent-server 的 HTTP 客户端"""
+        sandbox_state = self._get_sandbox_state(agent_id)
+        return AdaptorHttpClient(base_url=sandbox_state.adapter_base_url)
 
     def _compensate_sandbox_state(
         self,
