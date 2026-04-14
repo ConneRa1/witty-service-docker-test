@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import httpx
+import logging
+import time
+from datetime import datetime
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Protocol
 from uuid import uuid4
 
+from sqlalchemy import false
 from src.adapter.http_client import AdaptorHttpClient
 from src.adapter.websocket_client_pool import AdaptorEndpoint, WebSocketClientPool
 from src.adapter.websocket_protocol import OutboundMessage
@@ -134,6 +139,7 @@ class AgentManager:
         self._workspace_store = workspace_store
         self._sandbox_backend = sandbox_backend
         self._ws_client_pool = ws_client_pool or WebSocketClientPool()
+        self._logger = logging.getLogger(__name__)
 
     def create_agent(self, request: AgentCreateRequest) -> AgentCreateResult:
         agent_id = str(uuid4())
@@ -156,7 +162,65 @@ class AgentManager:
                 adapter_base_url=adapter_endpoint.base_url,
                 adapter_ready=True,
             )
-            default_session = self._session_manager.create_session(agent_id)
+
+            # 等待适配器就绪（同步等待 /v1/ping）
+            client: httpx.Client | None = None
+            for _ in range(30):  # 30 秒超时
+                try:
+                    client = httpx.Client(base_url=adapter_endpoint.base_url, timeout=5.0)
+                    response = client.get("/v1/ping")
+                    if response.status_code == 200:
+                        break
+                except Exception:
+                    pass
+                finally:
+                    if client is not None:
+                        client.close()
+                time.sleep(1)
+            else:
+                raise DomainError(
+                    code=AGENT_CREATE_FAILED,
+                    message="Sandbox health check timeout.",
+                    details={"agent_id": agent_id},
+                )
+
+            # 调用 /agent/start 启动 witty-agent-server 中的 agent
+            client = httpx.Client(base_url=adapter_endpoint.base_url, timeout=30.0)
+            try:
+                try:
+                    client.post("/agent/start", json={})
+                except httpx.HTTPStatusError as exc:
+                    raise DomainError(
+                        code=AGENT_CREATE_FAILED,
+                        message="Failed to start agent.",
+                        details={"agent_id": agent_id, "error": str(exc)},
+                    ) from exc
+            finally:
+                client.close()
+
+            # 调用 /agent/sessions 在 witty-agent-server 创建 session
+            client = httpx.Client(base_url=adapter_endpoint.base_url, timeout=30.0)
+            try:
+                response = client.post("/agent/sessions", json={})
+                response.raise_for_status()
+                session_data = response.json()
+            except httpx.HTTPStatusError as exc:
+                raise DomainError(
+                    code=AGENT_CREATE_FAILED,
+                    message="Failed to create session on agent.",
+                    details={"agent_id": agent_id, "error": str(exc)},
+                ) from exc
+            finally:
+                client.close()
+
+            default_session = self._session_manager.upsert_session(
+                session_id=session_data["id"],
+                agent_id=agent_id,
+                status="active",
+                context_initialized=session_data.get("context_initialized", True),
+                runtime_type=session_data.get("runtime_type"),
+                created_at=datetime.fromisoformat(session_data["created_at"]) if "created_at" in session_data else None,
+            )
             running_agent = self._repository.update_agent_status(
                 agent_id,
                 AgentStatus.running,
@@ -325,6 +389,7 @@ class AgentManager:
         content: str,
         adaptor_client: AdaptorHttpClient | None = None,
     ) -> dict[str, Any]:
+        self._logger.info(f"send_message called: agent_id={agent_id}, session_id={session_id}")
         agent = self._get_agent(agent_id)
 
         if adaptor_client is None:
@@ -342,6 +407,8 @@ class AgentManager:
                 details={"agent_id": agent_id, "status": agent.status.value},
             )
 
+        self._logger.info(f"Agent status OK: {agent.status}, preparing WebSocket client")
+
         self._repository.create_message(
             agent_id=agent_id,
             session_id=session_id,
@@ -350,7 +417,16 @@ class AgentManager:
         )
         ws_client = await self._prepare_ws_message_client(agent_id, session_id, content)
 
+        self._logger.info(
+            "WebSocket client ready: ws_client_id=%s is_connected=%s agent_id=%s session_id=%s",
+            id(ws_client),
+            ws_client.is_connected,
+            agent_id,
+            session_id,
+        )
+
         events: list[dict[str, Any]] = []
+        has_completed = False
         try:
             async for event in ws_client.recv():
                 event_dict = dict(event)
@@ -365,13 +441,28 @@ class AgentManager:
                         message=error_message,
                         details={"session_id": session_id, "agent_id": agent_id},
                     )
-
+                self._logger.debug(f"received event: {json.dumps(event_dict.get("payload"),indent=2,ensure_ascii=False)}")
                 events.append(event_dict)
                 if event_dict["type"] == "message.completed":
+                    has_completed = True
+                    self._logger.info("message.completed received, stopping")
                     break
         finally:
             await client_closer()
 
+        if not has_completed:
+            raise DomainError(
+                code="INVALID_MESSAGE_STREAM",
+                message="Message stream terminated before message.completed.",
+                details={
+                    "agent_id": agent_id,
+                    "session_id": session_id,
+                    "events_count": len(events),
+                    "last_event_type": events[-1].get("type") if events else None,
+                },
+            )
+
+            (f"Returning events count: {len(events)}")
         return {
             "sandbox_type": agent.sandbox_type,
             "events": events,
@@ -561,20 +652,34 @@ class AgentManager:
         session_id: str,
         content: str,
     ) -> WebSocketClient:
+        endpoint = self._get_adaptor_endpoint(agent_id, session_id)
+        self._logger.info(f"_prepare_ws: agent_id={agent_id}, session_id={session_id}, endpoint={endpoint}")
         ws_client = self._ws_client_pool.get_client(
             agent_id=agent_id,
-            endpoint=self._get_adaptor_endpoint(agent_id, session_id),
+            endpoint=endpoint,
             factory=lambda url: WebSocketClient(base_url=url),
         )
 
+        self._logger.info(
+            "_prepare_ws: pool returned client: ws_client_id=%s is_connected=%s agent_id=%s session_id=%s",
+            id(ws_client),
+            ws_client.is_connected,
+            agent_id,
+            session_id,
+        )
+
         if not ws_client.is_connected:
+            self._logger.info(f"_prepare_ws: connecting to {endpoint.base_url}/agent/sessions/{session_id}/ws")
             await ws_client.connect(session_id)
+            self._logger.info(f"_prepare_ws: connected successfully")
 
         msg: OutboundMessage = {
             "type": "message.create",
             "payload": {"message": content},
         }
+        self._logger.info(f"_prepare_ws: sending message: {msg}")
         await ws_client.send(msg)
+        self._logger.info(f"_prepare_ws: message sent")
         return ws_client
 
     def _get_sandbox_state(self, agent_id: str) -> SandboxState:
@@ -591,6 +696,48 @@ class AgentManager:
         """获取到 witty-agent-server 的 HTTP 客户端"""
         sandbox_state = self._get_sandbox_state(agent_id)
         return AdaptorHttpClient(base_url=sandbox_state.adapter_base_url)
+
+    async def _check_sandbox_health(self, agent_id: str) -> bool:
+        """检查沙箱是否健康存活"""
+        try:
+            adaptor_client = self._get_adaptor_http_client(agent_id)
+            try:
+                return await adaptor_client.health_check()
+            finally:
+                await adaptor_client.close()
+        except Exception:
+            return False
+
+    def _check_and_update_agent_status_if_needed(self, agent_id: str) -> AgentRecord:
+        """检查沙箱健康状态，如果进程停止则更新 agent 状态为 error"""
+        agent = self._get_agent(agent_id)
+
+        if agent.status not in {AgentStatus.running, AgentStatus.paused}:
+            return agent
+
+        # 只对 local_process 类型进行检查
+        if agent.sandbox_type != "local_process":
+            return agent
+
+        # 检查沙箱进程是否还在运行
+        sandbox_state = self._repository.get_sandbox_state(agent_id)
+        if sandbox_state is None:
+            return agent
+
+        import asyncio
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+        is_healthy = loop.run_until_complete(self._check_sandbox_health(agent_id))
+
+        if not is_healthy and agent.status == AgentStatus.running:
+            # 沙箱进程已停止，更新状态为 error
+            return self._repository.update_agent_status(agent_id, AgentStatus.error)
+
+        return agent
 
     def _backup_runtime(self, agent_id: str, runtime_type: str = "openclaw") -> Path | None:
         """备份运行时文件"""

@@ -72,6 +72,25 @@ class SessionManager:
         self.get_session(agent_id, session_id)
         self._repository.delete_session(session_id)
 
+    def upsert_session(
+        self,
+        session_id: str,
+        agent_id: str,
+        status: str,
+        context_initialized: bool = False,
+        runtime_type: str | None = None,
+        created_at: datetime | None = None,
+    ) -> SessionRecord:
+        """直接在本地 repository 创建/更新 session"""
+        return self._repository.upsert_session(
+            session_id=session_id,
+            agent_id=agent_id,
+            status=status,
+            context_initialized=context_initialized,
+            runtime_type=runtime_type,
+            created_at=created_at,
+        )
+
     async def create_session_remote(
         self,
         agent_id: str,

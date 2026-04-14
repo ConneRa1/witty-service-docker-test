@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any, AsyncIterator
 
 import websockets
@@ -13,11 +14,16 @@ from src.adapter.exceptions import (
 )
 from src.adapter.websocket_protocol import InboundEvent, OutboundMessage
 
+logger = logging.getLogger(__name__)
+
+
 class WebSocketClient:
     def __init__(self, base_url: str) -> None:
         self._base_url = base_url.rstrip("/")
         self._ws: websockets.WebSocketClientProtocol | None = None
         self._connected: bool = False
+        self._session_id: str | None = None
+        self._url: str | None = None
 
     @property
     def is_connected(self) -> bool:
@@ -29,8 +35,18 @@ class WebSocketClient:
     async def connect(self, session_id: str) -> None:
         url = self._build_url(session_id)
         try:
-            self._ws = await websockets.connect(url)
+            # Keep behavior aligned with witty-agent-server/test.py default:
+            # disable client ping to avoid spurious disconnects on long-running turns.
+            self._ws = await websockets.connect(url, ping_interval=None)
             self._connected = True
+            self._session_id = session_id
+            self._url = url
+            logger.info(
+                "WebSocket connected: client_id=%s session_id=%s url=%s",
+                id(self),
+                session_id,
+                url,
+            )
         except Exception as exc:
             raise AdaptorConnectionError(
                 message="WebSocket connection failed",
@@ -39,6 +55,12 @@ class WebSocketClient:
 
     async def disconnect(self) -> None:
         if self._ws:
+            logger.info(
+                "WebSocket disconnect requested: client_id=%s session_id=%s url=%s",
+                id(self),
+                self._session_id,
+                self._url,
+            )
             await self._ws.close()
             self._ws = None
             self._connected = False
@@ -93,12 +115,34 @@ class WebSocketClient:
                         message="Failed to parse WebSocket message",
                         details={"error": str(exc), "raw": raw[:200]},
                     ) from exc
-        except websockets.ConnectionClosed:
+        except websockets.ConnectionClosed as exc:
             self._connected = False
-            return
+            logger.warning(
+                "WebSocket connection closed: client_id=%s session_id=%s url=%s code=%s reason=%s",
+                id(self),
+                self._session_id,
+                self._url,
+                getattr(exc, "code", None),
+                getattr(exc, "reason", None),
+            )
+            raise AdaptorReceiveError(
+                message="WebSocket connection closed before stream completed",
+                details={
+                    "code": getattr(exc, "code", None),
+                    "reason": getattr(exc, "reason", None),
+                    "session_id": self._session_id,
+                    "url": self._url,
+                },
+            ) from exc
         except AdaptorReceiveError:
             raise
         except Exception as exc:
+            logger.exception(
+                "WebSocket recv exception: client_id=%s session_id=%s url=%s",
+                id(self),
+                self._session_id,
+                self._url,
+            )
             raise AdaptorReceiveError(
                 message="WebSocket receive failed",
                 details={"error": str(exc)},

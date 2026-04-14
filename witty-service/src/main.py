@@ -1,3 +1,5 @@
+import logging
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -6,6 +8,9 @@ from src.api.errors import register_exception_handlers
 from src.api.models import router as models_router
 from src.api.services import ServiceContainer, build_default_services
 from src.config import get_settings
+
+# 配置日志级别
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 
 
 def create_app(*, services: ServiceContainer | None = None) -> FastAPI:

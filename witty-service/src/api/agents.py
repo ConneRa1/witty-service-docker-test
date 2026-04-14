@@ -17,6 +17,7 @@ from src.api.schemas import (
 )
 from src.api.services import ServiceContainer
 from src.application.agent_manager import AGENT_NOT_FOUND, AgentCreateRequest
+from src.domain.enums import AgentStatus
 from src.domain.errors import DomainError
 from src.persistence.repositories import AgentRecord
 
@@ -44,7 +45,15 @@ def create_agent(
             has_scheduled_tasks=payload.has_scheduled_tasks,
         )
     )
-    return _to_agent_response(result.agent, default_session_id=result.default_session.id)
+
+    # Extract port for local_process sandbox
+    process_port: int | None = None
+    if payload.sandbox_type == "local_process":
+        sandbox_state = services.repository.get_sandbox_state(result.agent.id)
+        if sandbox_state is not None:
+            process_port = sandbox_state.sandbox_payload_json.get("metadata", {}).get("port")
+
+    return _to_agent_response(result.agent, default_session_id=result.default_session.id, process_port=process_port)
 
 
 @router.get("", response_model=list[AgentResponse])
@@ -52,12 +61,17 @@ def list_agents(services: ServiceContainer = Depends(get_services)) -> list[Agen
     agents = services.repository.list_agents()
     result = []
     for agent in agents:
+        manager = services.get_agent_manager_for_agent(agent.id)
+
+        # 检查沙箱健康状态，如果进程停止则更新 agent 状态为 error
+        agent = manager._check_and_update_agent_status_if_needed(agent.id)
+
         sessions = services.session_manager.list_sessions(agent.id)
         default_session_id = sessions[0].id if sessions else None
 
         # Extract port for local_process sandbox
         process_port: int | None = None
-        if agent.sandbox_type == "local_process":
+        if agent.sandbox_type == "local_process" and agent.status != AgentStatus.error:
             sandbox_state = services.repository.get_sandbox_state(agent.id)
             if sandbox_state is not None:
                 process_port = sandbox_state.sandbox_payload_json.get("metadata", {}).get("port")
@@ -68,7 +82,17 @@ def list_agents(services: ServiceContainer = Depends(get_services)) -> list[Agen
 
 @router.get("/{agent_id}", response_model=AgentResponse)
 def get_agent(agent_id: str, services: ServiceContainer = Depends(get_services)) -> AgentResponse:
-    agent = services.repository.get_agent(agent_id)
+    manager = services.get_agent_manager_for_agent(agent_id)
+
+    # 检查沙箱健康状态，如果进程停止则更新 agent 状态为 error
+    agent = manager._check_and_update_agent_status_if_needed(agent_id)
+
+    if agent.status == AgentStatus.error:
+        # 沙箱进程已停止
+        sessions = services.session_manager.list_sessions(agent_id)
+        default_session_id = sessions[0].id if sessions else None
+        return _to_agent_response(agent, default_session_id=default_session_id, process_port=None)
+
     if agent is None:
         raise DomainError(
             code=AGENT_NOT_FOUND,
