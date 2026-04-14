@@ -303,18 +303,14 @@ class AgentManager:
         # 3. 更新状态
         return self._repository.update_agent_status(agent_id, AgentStatus.running)
 
-    def resume_agent(self, agent_id: str) -> AgentRecord:
+    async def resume_agent(self, agent_id: str) -> AgentRecord:
         agent = self._get_agent(agent_id)
 
         if agent.status == AgentStatus.paused:
             self._ensure_transition(agent, AgentStatus.running)
-            return asyncio.get_event_loop().run_until_complete(
-                self._resume_from_paused(agent_id)
-            )
+            return await self._resume_from_paused(agent_id)
         elif agent.status == AgentStatus.deleted:
-            return asyncio.get_event_loop().run_until_complete(
-                self._resume_from_deleted(agent_id)
-            )
+            return await self._resume_from_deleted(agent_id)
         else:
             raise DomainError(
                 code=INVALID_AGENT_TRANSITION,
@@ -338,7 +334,7 @@ class AgentManager:
             client_closer: Callable[[], Any] = lambda: None
 
         if agent.status is AgentStatus.paused:
-            agent = self.resume_agent(agent_id)
+            agent = await self.resume_agent(agent_id)
         elif agent.status is not AgentStatus.running:
             raise DomainError(
                 code=AGENT_NOT_RUNNING,
@@ -390,7 +386,7 @@ class AgentManager:
         agent = self._get_agent(agent_id)
 
         if agent.status is AgentStatus.paused:
-            agent = self.resume_agent(agent_id)
+            agent = await self.resume_agent(agent_id)
         elif agent.status is not AgentStatus.running:
             raise DomainError(
                 code=AGENT_NOT_RUNNING,

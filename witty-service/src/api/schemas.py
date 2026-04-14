@@ -36,6 +36,7 @@ class AgentResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
     default_session_id: str | None = None
+    process_port: int | None = None
 
 
 class SessionResponse(BaseModel):

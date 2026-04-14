@@ -34,7 +34,7 @@ class WorkspaceStore:
 
     def _agent_workspace_path(self, agent_id: str) -> Path:
         self._validate_agent_id(agent_id)
-        workspace_path = self.base_dir / agent_id / "workspace"
+        workspace_path = self.base_dir / "agent-workspaces" / agent_id / "workspace"
         resolved_workspace_path = workspace_path.resolve()
         resolved_base_dir = self.base_dir.resolve()
         if not resolved_workspace_path.is_relative_to(resolved_base_dir):

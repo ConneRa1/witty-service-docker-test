@@ -50,15 +50,20 @@ def create_agent(
 @router.get("", response_model=list[AgentResponse])
 def list_agents(services: ServiceContainer = Depends(get_services)) -> list[AgentResponse]:
     agents = services.repository.list_agents()
-    return [
-        _to_agent_response(
-            agent,
-            default_session_id=(
-                sessions[0].id if (sessions := services.session_manager.list_sessions(agent.id)) else None
-            ),
-        )
-        for agent in agents
-    ]
+    result = []
+    for agent in agents:
+        sessions = services.session_manager.list_sessions(agent.id)
+        default_session_id = sessions[0].id if sessions else None
+
+        # Extract port for local_process sandbox
+        process_port: int | None = None
+        if agent.sandbox_type == "local_process":
+            sandbox_state = services.repository.get_sandbox_state(agent.id)
+            if sandbox_state is not None:
+                process_port = sandbox_state.sandbox_payload_json.get("metadata", {}).get("port")
+
+        result.append(_to_agent_response(agent, default_session_id=default_session_id, process_port=process_port))
+    return result
 
 
 @router.get("/{agent_id}", response_model=AgentResponse)
@@ -72,7 +77,15 @@ def get_agent(agent_id: str, services: ServiceContainer = Depends(get_services))
         )
     sessions = services.session_manager.list_sessions(agent_id)
     default_session_id = sessions[0].id if sessions else None
-    return _to_agent_response(agent, default_session_id=default_session_id)
+
+    # Extract port for local_process sandbox
+    process_port: int | None = None
+    if agent.sandbox_type == "local_process":
+        sandbox_state = services.repository.get_sandbox_state(agent_id)
+        if sandbox_state is not None:
+            process_port = sandbox_state.sandbox_payload_json.get("metadata", {}).get("port")
+
+    return _to_agent_response(agent, default_session_id=default_session_id, process_port=process_port)
 
 
 @router.delete("/{agent_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -92,17 +105,18 @@ def pause_agent(agent_id: str, services: ServiceContainer = Depends(get_services
 
 
 @router.post("/{agent_id}/resume", response_model=AgentResponse)
-def resume_agent(agent_id: str, services: ServiceContainer = Depends(get_services)) -> AgentResponse:
+async def resume_agent(agent_id: str, services: ServiceContainer = Depends(get_services)) -> AgentResponse:
     manager = services.get_agent_manager_for_agent(agent_id)
-    agent = manager.resume_agent(agent_id)
+    agent = await manager.resume_agent(agent_id)
     sessions = services.session_manager.list_sessions(agent_id)
     default_session_id = sessions[0].id if sessions else None
     return _to_agent_response(agent, default_session_id=default_session_id)
 
 
 @router.get("/{agent_id}/sessions", response_model=list[SessionResponse])
-def list_sessions(agent_id: str, services: ServiceContainer = Depends(get_services)) -> list[SessionResponse]:
-    sessions = services.session_manager.list_sessions(agent_id)
+async def list_sessions(agent_id: str, services: ServiceContainer = Depends(get_services)) -> list[SessionResponse]:
+    manager = services.get_agent_manager_for_agent(agent_id)
+    sessions = await manager.list_sessions(agent_id)
     return [SessionResponse.model_validate(session) for session in sessions]
 
 
@@ -207,7 +221,7 @@ async def send_message_stream(
     return StreamingResponse(stream(), media_type="text/event-stream")
 
 
-def _to_agent_response(agent: AgentRecord, default_session_id: str | None) -> AgentResponse:
+def _to_agent_response(agent: AgentRecord, default_session_id: str | None, process_port: int | None = None) -> AgentResponse:
     return AgentResponse(
         id=agent.id,
         name=agent.name,
@@ -222,6 +236,7 @@ def _to_agent_response(agent: AgentRecord, default_session_id: str | None) -> Ag
         created_at=agent.created_at,
         updated_at=agent.updated_at,
         default_session_id=default_session_id,
+        process_port=process_port,
     )
 
 

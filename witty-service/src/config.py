@@ -13,7 +13,7 @@ class Settings:
 
 def get_settings() -> Settings:
     return Settings(
-        auth_token=os.getenv("AUTH_TOKEN", "test-token"),
+        auth_token=os.getenv("AUTH_TOKEN", "dev-token"),
         cors_origins=["*"],
         cors_credentials=True,
         cors_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
