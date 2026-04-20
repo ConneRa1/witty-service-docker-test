@@ -180,7 +180,7 @@ class AgentManager:
             for i in range(30):  # 30 秒超时
                 try:
                     client = httpx.Client(base_url=adapter_endpoint.base_url, timeout=5.0)
-                    response = client.get("/v1/ping")
+                    response = client.get("/ping")
                     if response.status_code == 200:
                         logger.info(f"[AgentManager] Sandbox is ready after {i+1} attempts")
                         break
@@ -204,8 +204,17 @@ class AgentManager:
             client = httpx.Client(base_url=adapter_endpoint.base_url, timeout=30.0)
             try:
                 try:
-                    response = client.post("/agent/start", json={})
-                    logger.info(f"[AgentManager] /agent/start response: {response.status_code}")
+                    start_response = client.post("/agent/start", json={})
+                    start_response.raise_for_status()
+                    logger.info(f"[AgentManager] /agent/start response: {start_response.status_code}")
+                    started_agent = start_response.json()
+                    remote_runtime_agent_id = started_agent.get("id")
+                    if not isinstance(remote_runtime_agent_id, str) or not remote_runtime_agent_id:
+                        raise DomainError(
+                            code=AGENT_CREATE_FAILED,
+                            message="Started agent response missing runtime agent id.",
+                            details={"agent_id": agent_id},
+                        )
                 except httpx.HTTPStatusError as exc:
                     logger.error(f"[AgentManager] /agent/start failed: {exc}")
                     raise DomainError(
@@ -220,9 +229,9 @@ class AgentManager:
             logger.info(f"[AgentManager] Calling /agent/sessions...")
             client = httpx.Client(base_url=adapter_endpoint.base_url, timeout=30.0)
             try:
-                response = client.post("/agent/sessions", json={})
-                logger.info(f"[AgentManager] /agent/sessions response: {response.status_code}")
+                response = client.post(f"/agents/{remote_runtime_agent_id}/sessions", json={})
                 response.raise_for_status()
+                logger.info(f"[AgentManager] /agent/sessions response: {response.status_code}")
                 session_data = response.json()
                 logger.info(f"[AgentManager] Session data: {session_data}")
             except httpx.HTTPStatusError as exc:
@@ -238,10 +247,11 @@ class AgentManager:
             default_session = self._session_manager.upsert_session(
                 session_id=session_data["id"],
                 agent_id=agent_id,
-                status="active",
+                status=session_data.get("status", "idle"),
                 context_initialized=session_data.get("context_initialized", True),
                 runtime_type=session_data.get("runtime_type"),
                 created_at=datetime.fromisoformat(session_data["created_at"]) if "created_at" in session_data else None,
+                remote_runtime_agent_id=remote_runtime_agent_id,
             )
             logger.info(f"[AgentManager] Default session created: {default_session.id}")
             running_agent = self._repository.update_agent_status(
@@ -457,9 +467,15 @@ class AgentManager:
         try:
             async for event in ws_client.recv():
                 event_dict = dict(event)
+                # 刷新session状态
+                self._sync_session_state_from_event(
+                    agent_id=agent_id,
+                    session_id=session_id,
+                    event=event_dict,
+                )
 
                 # Handle client.error events from witty-agent-server
-                if event_dict["type"] == "client.error":
+                if event_dict["type"] in {"client.error", "stream.error"}:
                     error_payload = event_dict.get("payload", {})
                     error_code = error_payload.get("code", "UNKNOWN_ERROR")
                     error_message = error_payload.get("message", "Unknown error from adaptor")
@@ -468,12 +484,27 @@ class AgentManager:
                         message=error_message,
                         details={"session_id": session_id, "agent_id": agent_id},
                     )
-                self._logger.debug(f"received event: {json.dumps(event_dict.get("payload"),indent=2,ensure_ascii=False)}")
+                if self._should_filter_session_event(event_dict):
+                    self._logger.info(
+                        "filtered session state event from response: agent_id=%s session_id=%s event_type=%s",
+                        agent_id,
+                        session_id,
+                        event_dict["type"],
+                    )
+                    continue
+                self._logger.info(f"received event: {json.dumps(event_dict, indent=2, ensure_ascii=False)}")
                 events.append(event_dict)
                 if event_dict["type"] == "message.completed":
                     has_completed = True
                     self._logger.info("message.completed received, stopping")
                     break
+        except Exception:
+            self._session_manager.upsert_session(
+                session_id=session_id,
+                agent_id=agent_id,
+                status="error",
+            )
+            raise
         finally:
             await client_closer()
 
@@ -488,8 +519,6 @@ class AgentManager:
                     "last_event_type": events[-1].get("type") if events else None,
                 },
             )
-
-            (f"Returning events count: {len(events)}")
         return {
             "sandbox_type": agent.sandbox_type,
             "events": events,
@@ -520,28 +549,53 @@ class AgentManager:
         )
         ws_client = await self._prepare_ws_message_client(agent_id, session_id, content)
 
-        async for event in ws_client.recv():
-            event_dict = dict(event)
-
-            # Handle client.error events from witty-agent-server
-            if event_dict["type"] == "client.error":
-                error_payload = event_dict.get("payload", {})
-                error_code = error_payload.get("code", "UNKNOWN_ERROR")
-                error_message = error_payload.get("message", "Unknown error from adaptor")
-                raise DomainError(
-                    code=error_code,
-                    message=error_message,
-                    details={"session_id": session_id, "agent_id": agent_id},
+        try:
+            async for event in ws_client.recv():
+                event_dict = dict(event)
+                self._sync_session_state_from_event(
+                    agent_id=agent_id,
+                    session_id=session_id,
+                    event=event_dict,
                 )
 
-            yield {
-                "sandbox_type": agent.sandbox_type,
-                "event": event_dict,
-            }
-            if event_dict["type"] == "message.completed":
-                break
+                # Handle client.error events from witty-agent-server
+                if event_dict["type"] in {"client.error", "stream.error"}:
+                    error_payload = event_dict.get("payload", {})
+                    error_code = error_payload.get("code", "UNKNOWN_ERROR")
+                    error_message = error_payload.get("message", "Unknown error from adaptor")
+                    raise DomainError(
+                        code=error_code,
+                        message=error_message,
+                        details={"session_id": session_id, "agent_id": agent_id},
+                    )
+                if self._should_filter_session_event(event_dict):
+                    self._logger.info(
+                        "filtered session state event from stream: agent_id=%s session_id=%s event_type=%s",
+                        agent_id,
+                        session_id,
+                        event_dict["type"],
+                    )
+                    continue
 
-    async def create_session(self, agent_id: str) -> SessionRecord:
+                yield {
+                    "sandbox_type": agent.sandbox_type,
+                    "event": event_dict,
+                }
+                if event_dict["type"] == "message.completed":
+                    break
+        except Exception:
+            self._session_manager.upsert_session(
+                session_id=session_id,
+                agent_id=agent_id,
+                status="error",
+            )
+            raise
+
+    async def create_session(
+        self,
+        agent_id: str,
+        runtime_agent_id: str | None = None,
+    ) -> SessionRecord:
         agent = self._get_agent(agent_id)
         if agent.status is not AgentStatus.running:
             raise DomainError(
@@ -552,30 +606,86 @@ class AgentManager:
 
         adaptor_client = self._get_adaptor_http_client(agent_id)
         try:
-            session = await self._session_manager.create_session_remote(agent_id, adaptor_client)
+            session = await self._session_manager.create_session_remote(
+                agent_id,
+                adaptor_client,
+                runtime_agent_id=runtime_agent_id,
+            )
         finally:
             await adaptor_client.close()
 
         return session
 
-    async def list_sessions(self, agent_id: str) -> list[SessionRecord]:
+    async def list_sessions(
+        self,
+        agent_id: str,
+        runtime_agent_id: str | None = None,
+    ) -> list[SessionRecord]:
         adaptor_client = self._get_adaptor_http_client(agent_id)
         try:
-            return await self._session_manager.list_sessions_remote(agent_id, adaptor_client)
+            return await self._session_manager.list_sessions_remote(
+                agent_id,
+                adaptor_client,
+                runtime_agent_id=runtime_agent_id,
+            )
         finally:
             await adaptor_client.close()
 
-    async def get_session(self, agent_id: str, session_id: str) -> SessionRecord:
+    async def get_session(
+        self,
+        agent_id: str,
+        session_id: str,
+        runtime_agent_id: str | None = None,
+    ) -> SessionRecord:
         adaptor_client = self._get_adaptor_http_client(agent_id)
         try:
-            return await self._session_manager.get_session_remote(agent_id, session_id, adaptor_client)
+            return await self._session_manager.get_session_remote(
+                agent_id,
+                session_id,
+                adaptor_client,
+                runtime_agent_id=runtime_agent_id,
+            )
         finally:
             await adaptor_client.close()
 
-    async def delete_session(self, agent_id: str, session_id: str) -> None:
+    async def get_session_events(
+        self,
+        agent_id: str,
+        session_id: str,
+        offset: int = 0,
+        limit: int = 50,
+        runtime_agent_id: str | None = None,
+    ) -> dict[str, Any]:
         adaptor_client = self._get_adaptor_http_client(agent_id)
         try:
-            await self._session_manager.delete_session_remote(session_id, adaptor_client)
+            session = self._session_manager.get_session(agent_id, session_id)
+            resolved_runtime_agent_id = session.remote_runtime_agent_id
+            if resolved_runtime_agent_id is None:
+                resolved_runtime_agent_id = await self._session_manager.resolve_runtime_agent_id(
+                    adaptor_client=adaptor_client,
+                    runtime_agent_id=runtime_agent_id,
+                )
+            return await adaptor_client.get(
+                f"/agents/{resolved_runtime_agent_id}/sessions/{session_id}/events",
+                params={"offset": offset, "limit": limit},
+            )
+        finally:
+            await adaptor_client.close()
+
+    async def delete_session(
+        self,
+        agent_id: str,
+        session_id: str,
+        runtime_agent_id: str | None = None,
+    ) -> None:
+        adaptor_client = self._get_adaptor_http_client(agent_id)
+        try:
+            await self._session_manager.delete_session_remote(
+                agent_id,
+                session_id,
+                adaptor_client,
+                runtime_agent_id=runtime_agent_id,
+            )
         finally:
             await adaptor_client.close()
 
@@ -675,6 +785,13 @@ class AgentManager:
 
     def _get_adaptor_endpoint(self, agent_id: str, session_id: str) -> AdaptorEndpoint:
         sandbox_state = self._get_sandbox_state(agent_id)
+        session = self._session_manager.get_session(agent_id, session_id)
+        if session.remote_runtime_agent_id is None:
+            raise DomainError(
+                code="RUNTIME_AGENT_ID_MISSING",
+                message="Remote runtime agent id was not found for session.",
+                details={"agent_id": agent_id, "session_id": session_id},
+            )
         base_url = sandbox_state.adapter_base_url
         if base_url.startswith("https"):
             scheme = "wss"
@@ -683,7 +800,7 @@ class AgentManager:
         else:
             scheme = "ws"
         host = base_url.split("://")[-1]
-        ws_base_url = f"{scheme}://{host}"
+        ws_base_url = f"{scheme}://{host}/agents/{session.remote_runtime_agent_id}"
         return AdaptorEndpoint(
             base_url=ws_base_url,
             session_id=session_id,
@@ -713,7 +830,7 @@ class AgentManager:
         )
 
         if not ws_client.is_connected:
-            self._logger.info(f"_prepare_ws: connecting to {endpoint.base_url}/agent/sessions/{session_id}/ws")
+            self._logger.info(f"_prepare_ws: connecting to {endpoint.base_url}/sessions/{session_id}/ws")
             await ws_client.connect(session_id)
             self._logger.info(f"_prepare_ws: connected successfully")
 
@@ -725,6 +842,67 @@ class AgentManager:
         await ws_client.send(msg)
         self._logger.info(f"_prepare_ws: message sent")
         return ws_client
+
+    def _sync_session_state_from_event(
+        self,
+        *,
+        agent_id: str,
+        session_id: str,
+        event: dict[str, Any],
+    ) -> None:
+        """根据 adaptor WS 事件刷新本地 session 状态。"""
+        event_type = event.get("type")
+        payload = event.get("payload")
+        normalized_payload = payload if isinstance(payload, dict) else {}
+
+        if event_type in {"session.state_changed", "session.heartbeat"}:
+            state = normalized_payload.get("state")
+            if isinstance(state, str) and state in {"running", "idle", "error"}:
+                self._logger.info(
+                    "sync session state from ws event: agent_id=%s session_id=%s event_type=%s state=%s",
+                    agent_id,
+                    session_id,
+                    event_type,
+                    state,
+                )
+                self._session_manager.upsert_session(
+                    session_id=session_id,
+                    agent_id=agent_id,
+                    status=state,
+                )
+            return
+
+        if event_type == "message.completed":
+            self._logger.info(
+                "sync session state from ws event: agent_id=%s session_id=%s event_type=%s state=idle",
+                agent_id,
+                session_id,
+                event_type,
+            )
+            self._session_manager.upsert_session(
+                session_id=session_id,
+                agent_id=agent_id,
+                status="idle",
+            )
+            return
+
+        if event_type in {"client.error", "stream.error"}:
+            self._logger.info(
+                "sync session state from ws event: agent_id=%s session_id=%s event_type=%s state=error",
+                agent_id,
+                session_id,
+                event_type,
+            )
+            self._session_manager.upsert_session(
+                session_id=session_id,
+                agent_id=agent_id,
+                status="error",
+            )
+
+    def _should_filter_session_event(self, event: dict[str, Any]) -> bool:
+        """过滤仅用于本地 session 状态同步的内部事件。"""
+        event_type = event.get("type")
+        return event_type in {"session.state_changed", "session.heartbeat"}
 
     def _get_sandbox_state(self, agent_id: str) -> SandboxState:
         sandbox_state = self._repository.get_sandbox_state(agent_id)

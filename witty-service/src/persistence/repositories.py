@@ -59,6 +59,7 @@ class ModelRecord:
 class SessionRecord:
     id: str
     agent_id: str
+    remote_runtime_agent_id: str | None
     status: str
     created_at: datetime
     updated_at: datetime
@@ -187,7 +188,7 @@ class SqliteRepository:
         self,
         agent_id: str,
         *,
-        status: SessionStatus | str = SessionStatus.active,
+        status: SessionStatus | str = SessionStatus.idle,
     ) -> SessionRecord:
         with self._session_factory() as session:
             row = SessionORM(id=str(uuid4()), agent_id=agent_id, status=status)
@@ -221,6 +222,7 @@ class SqliteRepository:
         context_initialized: bool = False,
         runtime_type: str | None = None,
         created_at: datetime | None = None,
+        remote_runtime_agent_id: str | None = None,
     ) -> SessionRecord:
         """Upsert session from witty-agent-server"""
         with self._session_factory() as session:
@@ -231,6 +233,7 @@ class SqliteRepository:
                 row = SessionORM(
                     id=session_id,
                     agent_id=agent_id,
+                    remote_runtime_agent_id=remote_runtime_agent_id,
                     status=SessionStatus(status),
                     created_at=created_at or now,
                     updated_at=now,
@@ -238,6 +241,7 @@ class SqliteRepository:
                 session.add(row)
             else:
                 existing.status = SessionStatus(status)
+                existing.remote_runtime_agent_id = remote_runtime_agent_id or existing.remote_runtime_agent_id
                 existing.updated_at = now
 
             session.commit()
@@ -440,6 +444,7 @@ class SqliteRepository:
         return SessionRecord(
             id=row.id,
             agent_id=row.agent_id,
+            remote_runtime_agent_id=row.remote_runtime_agent_id,
             status=row.status.value if isinstance(row.status, SessionStatus) else row.status,
             created_at=row.created_at,
             updated_at=row.updated_at,

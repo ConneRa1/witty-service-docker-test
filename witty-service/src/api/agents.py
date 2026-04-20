@@ -138,9 +138,13 @@ async def resume_agent(agent_id: str, services: ServiceContainer = Depends(get_s
 
 
 @router.get("/{agent_id}/sessions", response_model=list[SessionResponse])
-async def list_sessions(agent_id: str, services: ServiceContainer = Depends(get_services)) -> list[SessionResponse]:
+async def list_sessions(
+    agent_id: str,
+    runtime_agent_id: str | None = None,
+    services: ServiceContainer = Depends(get_services),
+) -> list[SessionResponse]:
     manager = services.get_agent_manager_for_agent(agent_id)
-    sessions = await manager.list_sessions(agent_id)
+    sessions = await manager.list_sessions(agent_id, runtime_agent_id=runtime_agent_id)
     return [SessionResponse.model_validate(session) for session in sessions]
 
 
@@ -149,9 +153,13 @@ async def list_sessions(agent_id: str, services: ServiceContainer = Depends(get_
     response_model=SessionResponse,
     status_code=status.HTTP_201_CREATED,
 )
-async def create_session(agent_id: str, services: ServiceContainer = Depends(get_services)) -> SessionResponse:
+async def create_session(
+    agent_id: str,
+    runtime_agent_id: str | None = None,
+    services: ServiceContainer = Depends(get_services),
+) -> SessionResponse:
     manager = services.get_agent_manager_for_agent(agent_id)
-    session = await manager.create_session(agent_id)
+    session = await manager.create_session(agent_id, runtime_agent_id=runtime_agent_id)
     return SessionResponse.model_validate(session)
 
 
@@ -159,10 +167,11 @@ async def create_session(agent_id: str, services: ServiceContainer = Depends(get
 async def get_session(
     agent_id: str,
     session_id: str,
+    runtime_agent_id: str | None = None,
     services: ServiceContainer = Depends(get_services),
 ) -> SessionResponse:
     manager = services.get_agent_manager_for_agent(agent_id)
-    session = await manager.get_session(agent_id, session_id)
+    session = await manager.get_session(agent_id, session_id, runtime_agent_id=runtime_agent_id)
     return SessionResponse.model_validate(session)
 
 
@@ -172,27 +181,29 @@ async def get_session_events(
     session_id: str,
     offset: int = 0,
     limit: int = 50,
+    runtime_agent_id: str | None = None,
     services: ServiceContainer = Depends(get_services),
 ) -> SessionEventsResponse:
     manager = services.get_agent_manager_for_agent(agent_id)
-    adaptor_client = manager._get_adaptor_http_client(agent_id)
-    try:
-        result = await adaptor_client.get(
-            f"/agent/sessions/{session_id}/events",
-            params={"offset": offset, "limit": limit},
-        )
-        return SessionEventsResponse.model_validate(result)
-    finally:
-        await adaptor_client.close()
+    result = await manager.get_session_events(
+        agent_id=agent_id,
+        session_id=session_id,
+        offset=offset,
+        limit=limit,
+        runtime_agent_id=runtime_agent_id,
+    )
+    return SessionEventsResponse.model_validate(result)
 
 
 @router.delete("/{agent_id}/sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_session(
+async def delete_session(
     agent_id: str,
     session_id: str,
+    runtime_agent_id: str | None = None,
     services: ServiceContainer = Depends(get_services),
 ) -> Response:
-    services.session_manager.delete_session(agent_id, session_id)
+    manager = services.get_agent_manager_for_agent(agent_id)
+    await manager.delete_session(agent_id, session_id, runtime_agent_id=runtime_agent_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 

@@ -13,7 +13,7 @@ class AdaptorEndpoint:
 
 class WebSocketClientPool:
     def __init__(self) -> None:
-        self._clients: dict[str, WebSocketClient] = {}
+        self._clients: dict[tuple[str, str], WebSocketClient] = {}
 
     def get_client(
         self,
@@ -21,12 +21,15 @@ class WebSocketClientPool:
         endpoint: AdaptorEndpoint,
         factory: Callable[[str], WebSocketClient],
     ) -> WebSocketClient:
-        if agent_id not in self._clients:
-            self._clients[agent_id] = factory(endpoint.base_url)
-        return self._clients[agent_id]
+        key = (agent_id, endpoint.session_id)
+        if key not in self._clients:
+            self._clients[key] = factory(endpoint.base_url)
+        return self._clients[key]
 
     def remove_client(self, agent_id: str) -> None:
-        self._clients.pop(agent_id, None)
+        keys = [key for key in self._clients if key[0] == agent_id]
+        for key in keys:
+            self._clients.pop(key, None)
 
     async def close_all(self) -> None:
         for client in self._clients.values():

@@ -41,11 +41,15 @@ class AdaptorHttpClient:
         response = await client.delete(path)
         response.raise_for_status()
 
+    async def list_agents(self) -> dict[str, Any]:
+        """查询远端 runtime agent 列表。"""
+        return await self.get("/agent/list")
+
     async def health_check(self) -> bool:
         """健康检查"""
         try:
             client = await self._get_client()
-            response = await client.get("/v1/ping")
+            response = await client.get("/ping")
             return response.status_code == 200
         except Exception:
             return False

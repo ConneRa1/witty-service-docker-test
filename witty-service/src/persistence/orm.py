@@ -17,8 +17,9 @@ class Base(DeclarativeBase):
 
 
 class SessionStatus(str, Enum):
-    active = "active"
-    closed = "closed"
+    running = "running"
+    idle = "idle"
+    error = "error"
 
 
 class AgentORM(Base):
@@ -75,6 +76,7 @@ class SessionORM(Base):
         nullable=False,
         index=True,
     )
+    remote_runtime_agent_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     status: Mapped[SessionStatus] = mapped_column(
         SQLEnum(
             SessionStatus,
@@ -84,7 +86,7 @@ class SessionORM(Base):
             name="session_status",
         ),
         nullable=False,
-        default=SessionStatus.active,
+        default=SessionStatus.idle,
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

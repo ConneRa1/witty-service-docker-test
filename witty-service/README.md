@@ -83,11 +83,32 @@ curl -s http://127.0.0.1:8000/healthz
 | `/api/v1/models/{model_id}` | `DELETE` | 删除大模型配置 |
 | `/api/v1/agents/{agent_id}/sessions/{session_id}/events` | `GET` | 查询会话事件回放 |
 
+说明：
+- `GET /api/v1/agents/{agent_id}/sessions`
+- `POST /api/v1/agents/{agent_id}/sessions`
+- `GET /api/v1/agents/{agent_id}/sessions/{session_id}`
+- `DELETE /api/v1/agents/{agent_id}/sessions/{session_id}`
+- `GET /api/v1/agents/{agent_id}/sessions/{session_id}/events`
+
+以上接口均支持可选 query 参数 `runtime_agent_id`，用于指定远端 `witty-agent-server` 中的 runtime agent（例如 OpenClaw subagent）。
+未显式传入时，`witty-service` 会调用远端 `/agent/list`，优先使用 `defaultId`，若不存在则回退到 `default=true` 的条目。
+
+Agent 接口与 `runtime_agent_id` 的关系：
+- `witty-service` 自己的 `agent_id` 表示一个沙箱内的 `witty-agent-server` 进程实例
+- 远端 `runtime_agent_id` 表示该进程内的 runtime agent / OpenClaw subagent
+- `POST /api/v1/agents`、`GET /api/v1/agents`、`GET /api/v1/agents/{agent_id}`、`DELETE /api/v1/agents/{agent_id}`、`POST /api/v1/agents/{agent_id}/pause`、`POST /api/v1/agents/{agent_id}/resume` 这些 Agent 生命周期接口**不直接接收** `runtime_agent_id`
+- `runtime_agent_id` 只影响 session 相关接口的远端路由选择，不改变 `witty-service` 自己的 agent 主键语义
+
 ### 3.3 Agent 生命周期接口
 
 #### 1. `POST /api/v1/agents`
 
 - 接口描述：创建新 Agent
+- 说明：
+  - 该接口不接收 `runtime_agent_id`
+  - 创建完成后，`witty-service` 会先调用远端 `/agent/start`
+  - 然后使用 `/agent/start` 返回的远端 runtime agent id 创建默认 session
+  - 因此 `default_session_id` 对应的远端归属由 `witty-agent-server` 当前解析出的默认/启动目标 agent 决定
 - 输入（CreateAgentRequest）：
 
 | 字段 | 类型 | 必填 | 说明 |
@@ -135,6 +156,11 @@ curl -s http://127.0.0.1:8000/healthz
 | `created_at` | datetime | 创建时间 |
 | `updated_at` | datetime | 更新时间 |
 | `default_session_id` | string \| null | 默认会话 ID |
+
+补充说明：
+- `default_session_id` 是 Agent 创建成功后立即创建的默认 session
+- 这个默认 session 的远端 `runtime_agent_id` 不是通过 `POST /api/v1/agents` 入参传入，而是由内部 `/agent/start` 结果决定
+- 如果你需要把后续 session 显式路由到某个 remote runtime agent（例如 `dev`），应在 `POST /api/v1/agents/{agent_id}/sessions?runtime_agent_id=dev` 时传入
 
 #### 2. `GET /api/v1/agents`
 
@@ -289,7 +315,7 @@ curl -s http://127.0.0.1:8000/healthz
 {
   "id": "session-uuid",
   "agent_id": "agent-uuid",
-  "status": "active",
+  "status": "idle",
   "context_initialized": true,
   "runtime_type": "openclaw",
   "created_at": "2026-04-10T12:00:00",
@@ -301,11 +327,16 @@ curl -s http://127.0.0.1:8000/healthz
 |------|------|------|
 | `id` | string | 会话唯一标识 |
 | `agent_id` | string | 所属 Agent ID |
-| `status` | string | 会话状态：`active`、`closed` |
+| `status` | string | 会话运行态：`running`、`idle`、`error` |
 | `context_initialized` | boolean | witty-agent-server 是否已完成上下文初始化 |
 | `runtime_type` | string | 运行时类型：如 `openclaw` |
 | `created_at` | datetime | 创建时间 |
 | `updated_at` | datetime | 更新时间 |
+
+- 额外说明：
+  - `runtime_agent_id` 是创建前的路由参数。
+  - 创建成功后，`witty-service` 会在本地固化 `remote_runtime_agent_id`，后续该 session 的查询、删除、事件回放、消息发送和 WS 连接都会优先使用这个固化值。
+  - session 生命周期不再通过 `deleted`、`closed` 之类的状态表达，而是通过“记录是否存在 + 接口行为结果”体现。
 
 #### 3. `GET /api/v1/agents/{agent_id}/sessions/{session_id}`
 
@@ -316,6 +347,7 @@ curl -s http://127.0.0.1:8000/healthz
 
 - 接口描述：删除会话（透传到 witty-agent-server，删除本地记录）
 - 输出 `204`：无返回内容
+- 说明：内部会调用远端 `POST /agents/{remote_runtime_agent_id}/sessions/{session_id}/delete`
 
 #### 5. `GET /api/v1/agents/{agent_id}/sessions/{session_id}/events`
 
@@ -426,6 +458,7 @@ data: {"sandbox_type":"local_process","event":{"type":"message.delta","session_i
   - SSE 中每条 `data:` 对应一个上游事件。
   - `sandbox_type` 取自 Agent 的沙箱类型。
   - `event` 的内容保持上游 envelope 结构，包含来自上游 runtime 的 `runtime_type`，不额外嵌套 `sandbox_type`。
+  - session 状态同步规则为：收到运行中事件时更新为 `running`，收到 `message.completed` 后收敛为 `idle`，收到 `client.error` / `stream.error` 或 WS 异常时更新为 `error`。
 
 ### 3.6 事件类型
 
@@ -615,12 +648,16 @@ AGENT_ID=$(
 
 ```bash
 SESSION_ID=$(
-  curl -s -X POST "http://127.0.0.1:8000/api/v1/agents/${AGENT_ID}/sessions" \
+  curl -s -X POST "http://127.0.0.1:8000/api/v1/agents/${AGENT_ID}/sessions?runtime_agent_id=dev" \
     -H 'content-type: application/json' \
     -H 'authorization: Bearer YOUR_TOKEN' \
     -d '{}' | jq -r '.id'
 )
 ```
+
+说明：
+- 若不传 `runtime_agent_id`，会使用远端默认 runtime agent。
+- 若希望显式打到某个 subagent（例如 `dev`），请通过 query 参数传入。
 
 非流式消息接口（`/messages`）：
 
@@ -757,6 +794,8 @@ curl -s -X DELETE "http://127.0.0.1:8000/api/v1/agents/${AGENT_ID}" \
 
 **注意事项：**
 - `WITTY_AGENT_SERVER_APP_DIR` 必须指向有效的 `witty-agent-server` 代码目录
+- local process 场景下，每个 `witty-service` agent 都会拉起一个独立的 `witty-agent-server` 进程，并占用一个随机端口
+- `witty-service.agent_id` 表示这个本地子进程实例；远端 `runtime_agent_id` 表示该进程内的 OpenClaw subagent，两者不是同一个维度
 
 ---
 
@@ -773,7 +812,7 @@ E2B 云沙箱运行时。**当前未实现**，调用会返回 `SANDBOX_NOT_SUPP
 ```json
 {
   "base_url": "http://127.0.0.1:随机端口",
-  "health_url": "http://127.0.0.1:随机端口/v1/ping"
+  "health_url": "http://127.0.0.1:随机端口/ping"
 }
 ```
 
@@ -810,6 +849,8 @@ uv run pytest tests/ -q
 
 - `AGENT_NOT_FOUND`：Agent 不存在，检查 agent_id 是否正确
 - `SESSION_NOT_FOUND`：会话不存在（两边都查不到），检查 session_id 是否正确
+- `RUNTIME_AGENT_DEFAULT_NOT_FOUND`：未显式传 `runtime_agent_id`，且远端 `/agent/list` 没有可用默认 agent
+- `RUNTIME_AGENT_ID_MISSING`：本地 session 未固化远端 runtime agent id，无法继续路由
 - `SESSION_CREATE_FAILED`：创建会话失败，透传到 witty-agent-server 失败，检查 witty-agent-server 是否正常运行
 - `SESSION_DELETE_FAILED`：删除会话失败，透传到 witty-agent-server 失败
 - `SESSION_LIST_FAILED`：列出会话失败，透传到 witty-agent-server 失败
@@ -818,6 +859,7 @@ uv run pytest tests/ -q
 - `RUNTIME_BACKUP_NOT_FOUND`：运行时备份不存在，可能该 Agent 未执行过 delete 操作
 - `RUNTIME_BACKUP_RESTORE_FAILED`：恢复备份失败，检查备份文件是否完整
 - 消息发送无响应：确认 witty-agent-server 的 WebSocket 连接正常
+- local_process 创建 Agent 返回 500：优先检查 `WITTY_AGENT_SERVER_APP_DIR` 是否正确，以及子进程里的 `witty-agent-server` 是否能正常响应 `/ping`
 
 ## 9. 环境变量
 

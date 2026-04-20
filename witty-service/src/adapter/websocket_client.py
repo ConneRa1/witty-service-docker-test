@@ -30,7 +30,7 @@ class WebSocketClient:
         return self._connected
 
     def _build_url(self, session_id: str) -> str:
-        return f"{self._base_url}/agent/sessions/{session_id}/ws"
+        return f"{self._base_url}/sessions/{session_id}/ws"
 
     async def connect(self, session_id: str) -> None:
         url = self._build_url(session_id)

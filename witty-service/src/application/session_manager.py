@@ -29,6 +29,7 @@ class SessionRepository(Protocol):
         context_initialized: bool = False,
         runtime_type: str | None = None,
         created_at: datetime | None = None,
+        remote_runtime_agent_id: str | None = None,
     ) -> SessionRecord: ...
 
     def get_agent(self, agent_id: str) -> AgentRecord | None: ...
@@ -80,6 +81,7 @@ class SessionManager:
         context_initialized: bool = False,
         runtime_type: str | None = None,
         created_at: datetime | None = None,
+        remote_runtime_agent_id: str | None = None,
     ) -> SessionRecord:
         """直接在本地 repository 创建/更新 session"""
         return self._repository.upsert_session(
@@ -89,22 +91,57 @@ class SessionManager:
             context_initialized=context_initialized,
             runtime_type=runtime_type,
             created_at=created_at,
+            remote_runtime_agent_id=remote_runtime_agent_id,
+        )
+
+    async def resolve_runtime_agent_id(
+        self,
+        adaptor_client: AdaptorHttpClient,
+        runtime_agent_id: str | None = None,
+    ) -> str:
+        """解析远端 runtime agent id，显式参数优先，默认 agent 兜底。"""
+        if runtime_agent_id:
+            return runtime_agent_id
+
+        payload = await adaptor_client.list_agents()
+        default_id = payload.get("defaultId")
+        if isinstance(default_id, str) and default_id:
+            return default_id
+
+        agents = payload.get("agents")
+        if isinstance(agents, list):
+            for item in agents:
+                if isinstance(item, dict) and item.get("default") is True:
+                    item_id = item.get("id")
+                    if isinstance(item_id, str) and item_id:
+                        return item_id
+
+        raise DomainError(
+            code="RUNTIME_AGENT_DEFAULT_NOT_FOUND",
+            message="Default runtime agent was not found.",
+            details={},
         )
 
     async def create_session_remote(
         self,
         agent_id: str,
         adaptor_client: AdaptorHttpClient,
+        runtime_agent_id: str | None = None,
     ) -> SessionRecord:
         """在 witty-agent-server 创建 session"""
-        result = await adaptor_client.post("/agent/sessions", json={})
+        resolved_runtime_agent_id = await self.resolve_runtime_agent_id(
+            adaptor_client=adaptor_client,
+            runtime_agent_id=runtime_agent_id,
+        )
+        result = await adaptor_client.post(f"/agents/{resolved_runtime_agent_id}/sessions", json={})
         session = self._repository.upsert_session(
             session_id=result["id"],
             agent_id=agent_id,
-            status="active",
+            status=result.get("status", "idle"),
             context_initialized=result.get("context_initialized", True),
             runtime_type=result.get("runtime_type"),
             created_at=datetime.fromisoformat(result["created_at"]) if "created_at" in result else None,
+            remote_runtime_agent_id=resolved_runtime_agent_id,
         )
         return session
 
@@ -112,18 +149,24 @@ class SessionManager:
         self,
         agent_id: str,
         adaptor_client: AdaptorHttpClient,
+        runtime_agent_id: str | None = None,
     ) -> list[SessionRecord]:
         """从 witty-agent-server 列出会话并刷新缓存"""
-        result = await adaptor_client.get("/agent/sessions")
+        resolved_runtime_agent_id = await self.resolve_runtime_agent_id(
+            adaptor_client=adaptor_client,
+            runtime_agent_id=runtime_agent_id,
+        )
+        result = await adaptor_client.get(f"/agents/{resolved_runtime_agent_id}/sessions")
         sessions = []
         for item in result.get("sessions", []):
             session = self._repository.upsert_session(
                 session_id=item["id"],
                 agent_id=agent_id,
-                status=item.get("status", "active"),
+                status=item.get("status", "idle"),
                 context_initialized=item.get("context_initialized", True),
                 runtime_type=item.get("runtime_type"),
                 created_at=datetime.fromisoformat(item["created_at"]) if "created_at" in item else None,
+                remote_runtime_agent_id=resolved_runtime_agent_id,
             )
             sessions.append(session)
         return sessions
@@ -133,25 +176,48 @@ class SessionManager:
         agent_id: str,
         session_id: str,
         adaptor_client: AdaptorHttpClient,
+        runtime_agent_id: str | None = None,
     ) -> SessionRecord:
         """从 witty-agent-server 获取 session 并刷新缓存"""
-        result = await adaptor_client.get(f"/agent/sessions/{session_id}")
+        local_session = self._repository.get_session(session_id)
+        resolved_runtime_agent_id = (
+            local_session.remote_runtime_agent_id if local_session is not None else None
+        )
+        if resolved_runtime_agent_id is None:
+            resolved_runtime_agent_id = await self.resolve_runtime_agent_id(
+                adaptor_client=adaptor_client,
+                runtime_agent_id=runtime_agent_id,
+            )
+        result = await adaptor_client.get(f"/agents/{resolved_runtime_agent_id}/sessions/{session_id}")
         return self._repository.upsert_session(
             session_id=result["id"],
             agent_id=agent_id,
-            status=result.get("status", "active"),
+            status=result.get("status", "idle"),
             context_initialized=result.get("context_initialized", True),
             runtime_type=result.get("runtime_type"),
             created_at=datetime.fromisoformat(result["created_at"]) if "created_at" in result else None,
+            remote_runtime_agent_id=resolved_runtime_agent_id,
         )
 
     async def delete_session_remote(
         self,
+        agent_id: str,
         session_id: str,
         adaptor_client: AdaptorHttpClient,
+        runtime_agent_id: str | None = None,
     ) -> None:
         """透传到 witty-agent-server 删除 session"""
-        await adaptor_client.delete(f"/agent/sessions/{session_id}")
+        local_session = self.get_session(agent_id, session_id)
+        resolved_runtime_agent_id = local_session.remote_runtime_agent_id
+        if resolved_runtime_agent_id is None:
+            resolved_runtime_agent_id = await self.resolve_runtime_agent_id(
+                adaptor_client=adaptor_client,
+                runtime_agent_id=runtime_agent_id,
+            )
+        await adaptor_client.post(
+            f"/agents/{resolved_runtime_agent_id}/sessions/{session_id}/delete",
+            json={},
+        )
         self._repository.delete_session(session_id)
 
     def _require_agent(self, agent_id: str) -> None:
