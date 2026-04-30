@@ -1,12 +1,12 @@
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Response, status
-from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.app_server.config import depends_db_session, depends_user_context
-from openhands.app_server.skills.models.skill_discovery_models import SkillDiscoveryItem
 from openhands.app_server.skills.skill_repo.skill_repo_models import (
     CreateSkillRepoRequest,
     SkillRepo,
+    SkillRepoDiscoverPage,
+    SkillRepoDiscoverStatus,
     SkillRepoPage,
     UpdateSkillRepoRequest,
 )
@@ -16,21 +16,6 @@ from openhands.app_server.user.user_context import UserContext
 router = APIRouter(tags=['Skills'])
 user_dependency = depends_user_context()
 db_session_dependency = depends_db_session()
-
-
-class SkillRepoDiscoverPage(BaseModel):
-    items: list[SkillDiscoveryItem]
-
-
-class SkillRepoDiscoverStatusItem(BaseModel):
-    repo_id: str
-    repo_name: str
-    discover_status: str
-    skill_num: int
-
-
-class SkillRepoDiscoverStatus(BaseModel):
-    items: list[SkillRepoDiscoverStatusItem]
 
 
 def _build_service(
@@ -184,13 +169,4 @@ async def get_discover_status(
         raw_items = await service.get_discover_status()
     except PermissionError as exc:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from exc
-    items = [
-        SkillRepoDiscoverStatusItem(
-            repo_id=item['repo_id'],
-            repo_name=item['repo_name'],
-            discover_status=item['discover_status'],
-            skill_num=item['skill_num'],
-        )
-        for item in raw_items
-    ]
-    return SkillRepoDiscoverStatus(items=items)
+    return SkillRepoDiscoverStatus(items=raw_items)

@@ -38,3 +38,36 @@ class UpdateSkillRepoRequest(BaseModel):
     branch: str | None = None
     url: str | None = None
     local_path: str | None = None
+
+
+class SkillRepoDiscoverStatusItem(BaseModel):
+    repo_id: str
+    repo_name: str
+    discover_status: str
+    skill_num: int
+
+
+class SkillRepoDiscoverStatus(BaseModel):
+    items: list[SkillRepoDiscoverStatusItem]
+
+
+class SkillSourceRepo(BaseModel):
+    repo_id: str
+    name: str
+    source_type: SkillRepoSourceType
+    branch: str | None = None
+    url: str | None = None
+    local_path: str | None = None
+
+
+class SkillDiscoveryItem(BaseModel):
+    skill_id: str
+    skill_name: str
+    relative_path: str | None = None
+    metadata: dict | None = None
+    source_repo: SkillSourceRepo | None = None
+    skill_md_url: str | None = None
+
+
+class SkillRepoDiscoverPage(BaseModel):
+    items: list[SkillDiscoveryItem]

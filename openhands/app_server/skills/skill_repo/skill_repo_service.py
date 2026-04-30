@@ -3,11 +3,12 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+import re
+import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Callable, TypedDict
 from urllib.parse import urlparse
 from uuid import uuid4
 from zipfile import ZipFile
@@ -19,15 +20,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.agent_server.utils import utc_now
 from openhands.app_server.config import get_global_config
-from openhands.app_server.skills.models.skill_discovery_models import (
-    SkillDiscoveryActivationType,
-    SkillDiscoveryItem,
-    SkillSourceRepo,
-)
 from openhands.app_server.skills.skill_repo.skill_repo_models import (
     CreateSkillRepoRequest,
+    SkillDiscoveryItem,
     SkillRepo,
+    SkillRepoDiscoverStatusItem,
     SkillRepoSourceType,
+    SkillSourceRepo,
     UpdateSkillRepoRequest,
 )
 from openhands.app_server.user.user_context import UserContext
@@ -40,15 +39,9 @@ from openhands.app_server.utils.sql_utils import (
 _logger = logging.getLogger(__name__)
 
 
-class SkillRepoDiscoverStatusRow(TypedDict):
-    repo_id: str
-    repo_name: str
-    discover_status: str
-    skill_num: int
-
-
 DISCOVER_REPO_TIMEOUT_SECONDS = 30
 GIT_CLONE_RETRY_TIMES = 3
+LOCAL_ARCHIVE_BASE_DIR = Path('/opt/skill-repo-archives')
 
 
 class _BackgroundUserContext(UserContext):
@@ -85,9 +78,6 @@ class _BackgroundUserContext(UserContext):
 
 class StoredSkillRepo(Base):  # type: ignore
     __tablename__ = 'skill_repo'
-    __table_args__ = (
-        UniqueConstraint('user_id', 'name', name='uq_skill_repo_user_name'),
-    )
 
     repo_id = Column(String, primary_key=True)
     user_id = Column(String, nullable=False, index=True)
@@ -117,16 +107,6 @@ class StoredSkillRepoDiscoveryCache(Base):  # type: ignore
     updated_at = Column(UtcDateTime, nullable=False, default=utc_now)
 
 
-@dataclass(frozen=True)
-class DiscoveredRepoSkill:
-    key: str
-    name: str
-    activation_type: SkillDiscoveryActivationType
-    triggers: list[str]
-    origin_path: str
-    content: str
-
-
 @dataclass
 class SkillRepoService:
     db_session: AsyncSession
@@ -143,18 +123,18 @@ class SkillRepoService:
 
     async def create_skill_repo(self, request: CreateSkillRepoRequest) -> SkillRepo:
         user_id = await self._require_user_id()
-        normalized = self._normalize_create_request(request)
+        normalized_request = self._normalize_create_request(request)
 
-        name = self._derive_repo_name(normalized)
+        name = self._derive_repo_name(normalized_request)
         await self._check_unique_name(user_id, name)
         stored = StoredSkillRepo(
             repo_id=str(uuid4()),
             user_id=user_id,
             name=name,
-            source_type=normalized.source_type.value,
-            branch=normalized.branch,
-            url=normalized.url,
-            local_path=normalized.local_path,
+            source_type=normalized_request.source_type.value,
+            branch=normalized_request.branch,
+            url=normalized_request.url,
+            local_path=normalized_request.local_path,
             created_at=utc_now(),
             updated_at=utc_now(),
         )
@@ -191,12 +171,13 @@ class SkillRepoService:
         self, repo_id: str, request: UpdateSkillRepoRequest
     ) -> SkillRepo:
         stored = await self._get_owned_repo(repo_id)
-
-        source_type = request.source_type or self._coerce_source_type(
-            stored.source_type
-        )
+        source_type = request.source_type or stored.source_type
         branch = request.branch.strip() if request.branch is not None else stored.branch
-        url = request.url.strip() if request.url is not None else stored.url
+        url = (
+            self._normalize_git_clone_url(request.url.strip())
+            if request.url is not None
+            else stored.url
+        )
         local_path = (
             request.local_path.strip()
             if request.local_path is not None
@@ -207,7 +188,6 @@ class SkillRepoService:
             source_type=source_type,
             url=url,
             local_path=local_path,
-            branch=branch,
         )
         stored.source_type = source_type.value
         stored.branch = branch or None
@@ -231,7 +211,7 @@ class SkillRepoService:
         await self.db_session.commit()
 
     async def discover_repos_skill(
-        self, *, include_content: bool = False
+        self, *, include_content: bool = True
     ) -> list[SkillDiscoveryItem]:
         user_id = await self._require_user_id()
         repos = await self._list_owned_repos(user_id)
@@ -243,24 +223,10 @@ class SkillRepoService:
             await self._set_discovery_status(repo, 'discovering')
             try:
                 repo_skills = self._discover_repo_skills(repo)
-                repo_items = [
-                    SkillDiscoveryItem(
-                        key=skill.key,
-                        name=skill.name,
-                        activation_type=skill.activation_type,
-                        triggers=skill.triggers,
-                        origin_path=skill.origin_path,
-                        content=skill.content if include_content else None,
-                        source_repo=self._build_source_repo(repo),
-                        source_ref=repo.branch,
-                        readme_url=self._build_readme_url(repo, skill.origin_path),
-                    )
-                    for skill in repo_skills
-                ]
-                items.extend(repo_items)
+                items.extend(repo_skills)
                 grouped_payload[repo.repo_id] = (
                     repo.name,
-                    [item.model_dump(mode='json') for item in repo_items],
+                    [item.model_dump(mode='json') for item in repo_skills],
                 )
                 statuses[repo.repo_id] = 'done'
             except Exception as exc:
@@ -308,29 +274,15 @@ class SkillRepoService:
                 asyncio.to_thread(self._discover_repo_skills, stored),
                 timeout=DISCOVER_REPO_TIMEOUT_SECONDS,
             )
-            items = [
-                SkillDiscoveryItem(
-                    key=skill.key,
-                    name=skill.name,
-                    activation_type=skill.activation_type,
-                    triggers=skill.triggers,
-                    origin_path=skill.origin_path,
-                    content=skill.content if include_content else None,
-                    source_repo=self._build_source_repo(stored),
-                    source_ref=stored.branch,
-                    readme_url=self._build_readme_url(stored, skill.origin_path),
-                )
-                for skill in repo_skills
-            ]
             await self._store_discovery_cache_for_one_repo(
-                repo_id, items, status='done'
+                repo_id, repo_skills, status='done'
             )
             _logger.info(
                 'Marking skill discovery: repo_id=%s, user=%s, status=done',
                 repo_id,
                 user_id,
             )
-            return items
+            return repo_skills
         except Exception as exc:
             await self._store_discovery_cache_for_one_repo(repo_id, [], status='failed')
             _logger.error(
@@ -339,6 +291,7 @@ class SkillRepoService:
                 user_id,
                 exc,
             )
+
             return []
 
     async def get_discovered_repos_skill(self) -> list[SkillDiscoveryItem]:
@@ -387,7 +340,7 @@ class SkillRepoService:
             _logger.warning('Failed to parse discovery cache: %s', exc)
             return []
 
-    async def get_discover_status(self) -> list[SkillRepoDiscoverStatusRow]:
+    async def get_discover_status(self) -> list[SkillRepoDiscoverStatusItem]:
         user_id = await self._require_user_id()
         result = await self.db_session.execute(
             select(StoredSkillRepoDiscoveryCache).where(
@@ -396,13 +349,13 @@ class SkillRepoService:
         )
         rows = result.scalars().all()
         return [
-            {
-                'repo_id': row.repo_id,
-                'repo_name': row.repo_name,
-                'discover_status': row.discover_status,
-                'skill_num': row.skill_num,
-            }
-            for row in rows
+            SkillRepoDiscoverStatusItem(
+                repo_id=item.repo_id,
+                repo_name=item.repo_name,
+                discover_status=item.discover_status,
+                skill_num=item.skill_num,
+            )
+            for item in rows
         ]
 
     async def _discover_all_repos_skill(
@@ -421,6 +374,7 @@ class SkillRepoService:
         for repo in result.scalars().all():
             try:
                 repo_skills = self._discover_repo_skills(repo)
+                items.extend(repo_skills)
             except Exception as exc:
                 _logger.warning(
                     'Failed to discover skills from repo %s (%s): %s',
@@ -429,22 +383,6 @@ class SkillRepoService:
                     exc,
                 )
                 continue
-
-            for skill in repo_skills:
-                items.append(
-                    SkillDiscoveryItem(
-                        key=skill.key,
-                        name=skill.name,
-                        activation_type=skill.activation_type,
-                        triggers=skill.triggers,
-                        origin_path=skill.origin_path,
-                        content=skill.content if include_content else None,
-                        source_repo=self._build_source_repo(repo),
-                        source_ref=repo.branch,
-                        readme_url=self._build_readme_url(repo, skill.origin_path),
-                    )
-                )
-
         return items
 
     async def _store_discovery_cache_for_all_repos(
@@ -523,42 +461,6 @@ class SkillRepoService:
             cached.updated_at = utc_now()
         await self.db_session.commit()
 
-    async def get_repo_skill_by_key(
-        self, *, repo_key: str, include_content: bool = True
-    ) -> SkillDiscoveryItem | None:
-        parsed = self._parse_repo_key(repo_key)
-        if parsed is None:
-            raise ValueError(f'Invalid repo_key: {repo_key}')
-        repo_id, _ = parsed
-
-        stored = await self._get_owned_repo(repo_id)
-        try:
-            repo_skills = self._discover_repo_skills(stored)
-        except Exception as exc:
-            _logger.warning(
-                'Failed to discover skills from repo %s (%s): %s',
-                stored.repo_id,
-                stored.name,
-                exc,
-            )
-            return None
-
-        for skill in repo_skills:
-            if skill.key != repo_key:
-                continue
-            return SkillDiscoveryItem(
-                key=skill.key,
-                name=skill.name,
-                activation_type=skill.activation_type,
-                triggers=skill.triggers,
-                origin_path=skill.origin_path,
-                content=skill.content if include_content else None,
-                source_repo=self._build_source_repo(stored),
-                source_ref=stored.branch,
-                readme_url=self._build_readme_url(stored, skill.origin_path),
-            )
-        return None
-
     async def _get_owned_repo(self, repo_id: str) -> StoredSkillRepo:
         user_id = await self._require_user_id()
         result = await self.db_session.execute(
@@ -624,7 +526,9 @@ class SkillRepoService:
                 'branch': request.branch.strip()
                 if request.branch is not None
                 else None,
-                'url': url.strip() if url is not None else None,
+                'url': self._normalize_git_clone_url(url.strip())
+                if url is not None
+                else None,
                 'local_path': local_path.strip() if local_path is not None else None,
             }
         )
@@ -632,24 +536,61 @@ class SkillRepoService:
             source_type=normalized.source_type,
             url=normalized.url,
             local_path=normalized.local_path,
-            branch=normalized.branch,
         )
         return normalized
+
+    def _normalize_git_clone_url(self, url: str | None) -> str:
+        if not url:
+            return ''
+
+        url = url.strip()
+
+        # --- SSH 格式: git@github.com:user/repo(.git) ---
+        ssh_match = re.match(r'git@([^:]+):(.+)', url)
+        if ssh_match:
+            host = ssh_match.group(1)
+            path = ssh_match.group(2)
+
+            # 去掉多余的 /
+            path = path.strip('/')
+            return f'git@{host}:{path}'
+
+        # --- HTTP / HTTPS / git 协议 ---
+        parsed = urlparse(url)
+
+        if not parsed.scheme or not parsed.netloc:
+            # 非法 URL，直接返回原值或空
+            return ''
+
+        path = parsed.path.strip('/')
+
+        # 去掉已有 .git 再统一加（避免 repo.git.git）
+        if path.endswith('.git'):
+            path = path[:-4]
+
+        return f'{parsed.scheme}://{parsed.netloc}/{path}'
 
     def _derive_repo_name(self, request: CreateSkillRepoRequest) -> str:
         source_type = request.source_type
         if source_type == SkillRepoSourceType.GIT:
-            owner, repo_name = self._parse_git_owner_repo(request.url)
-            branch = request.branch or ''
-            return f'git:{owner}/{repo_name}@{branch}'
-        if source_type == SkillRepoSourceType.LOCAL_IMPORT and request.local_path:
-            local_path = Path(request.local_path).expanduser()
+            url = request.url
+            if not url:
+                raise ValueError(f'{source_type.value} skill repos require url')
+            url = url.removesuffix('.git')
+            branch = request.branch
+            if branch is None:
+                return f'{url}'
+            return f'{url}@{branch}'
+        else:
+            local_path_str = request.local_path
+            if not local_path_str:
+                raise ValueError('local_import skill repos require local_path')
+            local_path = Path(local_path_str).expanduser()
             if local_path.is_file() and local_path.suffix == '.zip':
                 repo_name = local_path.stem or 'local-zip'
             else:
                 repo_name = local_path.name or 'local-repo'
             return f'local:{repo_name}'
-        return f'{source_type.value}-repo'
 
     async def _check_unique_name(self, user_id: str, repo_name: str) -> None:
         result = await self.db_session.execute(
@@ -670,25 +611,23 @@ class SkillRepoService:
         source_type: SkillRepoSourceType,
         url: str | None,
         local_path: str | None,
-        branch: str | None,
     ) -> None:
         if source_type == SkillRepoSourceType.GIT:
             if not url:
                 raise ValueError(f'{source_type.value} skill repos require url')
-            if not branch:
-                raise ValueError(f'{source_type.value} skill repos require branch')
             return
-        if source_type == SkillRepoSourceType.LOCAL_IMPORT:
+        elif source_type == SkillRepoSourceType.LOCAL_IMPORT:
             if not local_path:
                 raise ValueError('local_import skill repos require local_path')
             return
+        else:
+            raise ValueError(f'Unsupported skill repo source type: {source_type}')
 
     def _to_model(self, stored: StoredSkillRepo) -> SkillRepo:
-        source_type = self._coerce_source_type(stored.source_type)
         return SkillRepo(
             repo_id=stored.repo_id,
             name=stored.name,
-            source_type=source_type,
+            source_type=stored.source_type,
             branch=stored.branch,
             url=stored.url,
             local_path=stored.local_path,
@@ -702,62 +641,31 @@ class SkillRepoService:
             return None
         return parts[1], parts[2]
 
-    def _coerce_source_type(self, source_type: str) -> SkillRepoSourceType:
-        # Treat legacy zip_url/local_dir as local_import for backward compatibility.
-        if source_type in {'zip_url', 'local_dir'}:
-            return SkillRepoSourceType.LOCAL_IMPORT
-        return SkillRepoSourceType(source_type)
+    def _discover_repo_skills(self, repo: StoredSkillRepo) -> list[SkillDiscoveryItem]:
+        if repo.source_type == SkillRepoSourceType.LOCAL_IMPORT:
+            return self._discover_local_repo_skills(repo)
+        return self._discover_git_repo_skills(repo)
 
-    def _discover_repo_skills(self, repo: StoredSkillRepo) -> list[DiscoveredRepoSkill]:
-        source_type = self._coerce_source_type(repo.source_type)
-        if source_type == SkillRepoSourceType.LOCAL_IMPORT:
-            if repo.local_path is None:
-                _logger.warning(
-                    'Discover repo skills skipped for repo_id=%s: local_path is empty',
-                    repo.repo_id,
-                )
-                return []
-            local_path = Path(repo.local_path).expanduser().resolve(strict=False)
-            if local_path.is_file() and local_path.suffix == '.zip':
-                _logger.info(
-                    'Discover repo skills treating repo_id=%s, local_path=%s as local archive',
-                    repo.repo_id,
-                    local_path,
-                )
-                return self._discover_local_archive_skills(repo, local_path)
-            _logger.info(
-                'Discover repo skills treating repo_id=%s, local_path=%s as local repo',
-                repo.repo_id,
-                local_path,
-            )
-            return self._scan_local_repo(repo=repo, repo_root=local_path)
+    def _discover_git_repo_skills(
+        self, repo: StoredSkillRepo
+    ) -> list[SkillDiscoveryItem]:
         _logger.info(
             'Discover repo skills treating repo_id=%s, repo_url=%s as git repo url',
             repo.repo_id,
             repo.url,
         )
-        return self._discover_git_repo_skills(repo)
-
-    def _discover_git_repo_skills(
-        self, repo: StoredSkillRepo
-    ) -> list[DiscoveredRepoSkill]:
-        if repo.url is None:
-            _logger.warning(
-                'Git discover skipped for repo_id=%s: repo url is empty',
-                repo.repo_id,
-            )
-            return []
-
         with TemporaryDirectory() as temp_dir:
             clone_dir = Path(temp_dir) / 'repo'
+            clone_url = self._normalize_clone_url_for_git(repo.url)
             command = ['git', 'clone', '--depth', '1']
             if repo.branch:
                 command.extend(['--branch', repo.branch])
-            command.extend([repo.url, str(clone_dir)])
+            command.extend([clone_url, str(clone_dir)])
             _logger.info(
-                'Git discover cloning repo_id=%s url=%s branch=%s into %s',
+                'Git discover cloning repo_id=%s url=%s clone_url=%s branch=%s into %s',
                 repo.repo_id,
                 repo.url,
+                clone_url,
                 repo.branch,
                 clone_dir,
             )
@@ -768,10 +676,10 @@ class SkillRepoService:
                     break
                 except subprocess.CalledProcessError as exc:
                     last_exc = exc
-                    _logger.warning(
+                    _logger.error(
                         'Failed to clone repo_id=%s url=%s on branch %s (attempt %s/%s): %s',
                         repo.repo_id,
-                        repo.url,
+                        clone_url,
                         repo.branch,
                         attempt,
                         GIT_CLONE_RETRY_TIMES,
@@ -780,34 +688,69 @@ class SkillRepoService:
             else:
                 assert last_exc is not None
                 raise last_exc
-            return self._scan_git_repo(repo=repo, repo_root=clone_dir)
 
-    def _discover_local_archive_skills(
-        self, repo: StoredSkillRepo, archive_path: Path
-    ) -> list[DiscoveredRepoSkill]:
+            if not repo.branch:
+                default_branch = self._get_cloned_repo_branch(clone_dir)
+                if default_branch:
+                    repo.branch = default_branch
+                    _logger.info(
+                        'Resolved default branch for repo_id=%s as %s after clone',
+                        repo.repo_id,
+                        default_branch,
+                    )
+
+            return self._scan_repo_root(
+                repo=repo,
+                repo_root=clone_dir,
+                only_root=False,
+            )
+
+    def _get_cloned_repo_branch(self, clone_dir: Path) -> str | None:
+        try:
+            result = subprocess.run(
+                ['git', '-C', str(clone_dir), 'rev-parse', '--abbrev-ref', 'HEAD'],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except subprocess.CalledProcessError as exc:
+            _logger.warning(
+                'Failed to resolve default branch from cloned repo %s: %s',
+                clone_dir,
+                exc.stderr,
+            )
+            return None
+
+        branch = result.stdout.strip()
+        if not branch or branch == 'HEAD':
+            return None
+        return branch
+
+    def _normalize_clone_url_for_git(self, repo_url: str | None) -> str:
+        if not repo_url:
+            raise ValueError('git skill repos require url')
+        if repo_url.endswith('.git'):
+            return repo_url
+        return f'{repo_url}.git'
+
+    def _extract_local_archive_to_dir(
+        self, repo: StoredSkillRepo, archive_path: Path, extract_dir: Path
+    ) -> Path:
         _logger.info(
-            'Local archive discover start for repo_id=%s archive_path=%s',
+            'Discover repo skills treating repo_id=%s, local_path=%s as local archive',
             repo.repo_id,
             archive_path,
         )
-        with TemporaryDirectory() as temp_dir:
-            extract_dir = Path(temp_dir) / 'archive'
-            extract_dir.mkdir(parents=True, exist_ok=True)
-            _logger.info(
-                'Extracting local archive for repo_id=%s into %s',
-                repo.repo_id,
-                extract_dir,
-            )
-            with ZipFile(archive_path) as archive:
-                archive.extractall(extract_dir)
+        extract_dir.mkdir(parents=True, exist_ok=True)
+        _logger.info(
+            'Extracting local archive for repo_id=%s into %s',
+            repo.repo_id,
+            extract_dir,
+        )
+        with ZipFile(archive_path) as archive:
+            archive.extractall(extract_dir)
 
-            repo_root = self._find_archive_repo_root(extract_dir)
-            _logger.info(
-                'Local archive discover resolved repo root for repo_id=%s: %s',
-                repo.repo_id,
-                repo_root,
-            )
-            return self._scan_local_repo(repo=repo, repo_root=repo_root)
+        return self._find_archive_repo_root(extract_dir)
 
     def _find_archive_repo_root(self, extract_dir: Path) -> Path:
         children = [child for child in extract_dir.iterdir() if child.is_dir()]
@@ -815,52 +758,53 @@ class SkillRepoService:
             return children[0]
         return extract_dir
 
-    def _scan_git_repo(
-        self, repo: StoredSkillRepo, repo_root: Path
-    ) -> list[DiscoveredRepoSkill]:
-        owner, repo_name = self._parse_git_owner_repo(repo.url)
-        branch = repo.branch or 'main'
-        prefix = f'git:{owner}/{repo_name}@{branch}'
-        return self._scan_repo_root(
-            repo=repo,
-            repo_root=repo_root,
-            name_builder=lambda skill_name, repo_name_hint: f'{prefix}/{skill_name}',
-            only_root=False,
-        )
+    def _discover_local_repo_skills(
+        self, repo: StoredSkillRepo
+    ) -> list[SkillDiscoveryItem]:
+        local_path = Path(repo.local_path).expanduser().resolve(strict=False)
+        if local_path.is_file() and local_path.suffix == '.zip':
+            extract_dir = self._prepare_archive_extract_dir(repo)
+            repo_root = self._extract_local_archive_to_dir(
+                repo=repo,
+                archive_path=local_path,
+                extract_dir=extract_dir,
+            )
+            return self._scan_local_repo_root(repo, repo_root)
 
-    def _scan_local_repo(
+        repo_root = local_path
+        return self._scan_local_repo_root(repo, repo_root)
+
+    def _prepare_archive_extract_dir(self, repo: StoredSkillRepo) -> Path:
+        extract_dir = LOCAL_ARCHIVE_BASE_DIR / repo.repo_id
+        if extract_dir.parent.exists():
+            shutil.rmtree(extract_dir.parent)
+        extract_dir.mkdir(parents=True, exist_ok=True)
+        _logger.info(
+            'Prepared persistent archive directory for repo_id=%s at %s',
+            repo.repo_id,
+            extract_dir,
+        )
+        return extract_dir
+
+    def _scan_local_repo_root(
         self, repo: StoredSkillRepo, repo_root: Path
-    ) -> list[DiscoveredRepoSkill]:
+    ) -> list[SkillDiscoveryItem]:
+        _logger.info(
+            'Discover repo skills treating repo_id=%s, local_path=%s as local repo',
+            repo.repo_id,
+            repo.local_path,
+        )
         # If root contains SKILL.md, treat it as a single-skill import.
         root_skill = repo_root / 'SKILL.md'
         if root_skill.exists():
-            _logger.info(
-                'Local repo scan found root SKILL.md for repo_id=%s at %s',
-                repo.repo_id,
-                root_skill,
-            )
             return self._scan_repo_root(
                 repo=repo,
                 repo_root=repo_root,
-                name_builder=lambda skill_name, repo_name_hint: f'local:{skill_name}',
                 only_root=True,
             )
-        repo_name_hint = repo_root.name or 'repo'
-        _logger.info(
-            'Local repo scan using nested SKILL.md discovery for repo_id=%s repo_name_hint=%s',
-            repo.repo_id,
-            repo_name_hint,
-        )
-
-        def _local_name_builder(
-            skill_name: str, repo_name_hint: str = repo_name_hint
-        ) -> str:
-            return f'local:{repo_name_hint}/{skill_name}'
-
         return self._scan_repo_root(
             repo=repo,
             repo_root=repo_root,
-            name_builder=_local_name_builder,
             only_root=False,
         )
 
@@ -868,17 +812,12 @@ class SkillRepoService:
         self,
         repo: StoredSkillRepo,
         repo_root: Path,
-        *,
-        name_builder: Callable[[str, str], str],
         only_root: bool,
-    ) -> list[DiscoveredRepoSkill]:
+    ) -> list[SkillDiscoveryItem]:
         if not repo_root.exists():
-            _logger.warning(
-                'Repo root scan skipped for repo_id=%s: repo_root does not exist (%s)',
-                repo.repo_id,
-                repo_root,
-            )
-            return []
+            message = f'Repo root does not exist for repo {repo.repo_id}: {repo_root}'
+            _logger.warning(message)
+            raise ValueError(message)
 
         if only_root:
             skill_files = [repo_root / 'SKILL.md']
@@ -896,7 +835,8 @@ class SkillRepoService:
             only_root,
         )
 
-        discovered: list[DiscoveredRepoSkill] = []
+        discovered: list[SkillDiscoveryItem] = []
+        source_repo = self._build_source_repo(repo)
         for skill_file in skill_files:
             if not skill_file.exists():
                 _logger.warning(
@@ -906,23 +846,21 @@ class SkillRepoService:
                 )
                 continue
             try:
-                metadata, content = self._load_skill_frontmatter(skill_file)
+                metadata, _ = self._load_skill_frontmatter(skill_file)
             except Exception as exc:
                 raise ValueError(
                     f'Failed to parse skill file {skill_file}: {exc}'
                 ) from exc
-            triggers = self._normalize_repo_triggers(metadata.get('triggers'))
             skill_name = self._derive_repo_skill_name(skill_file, metadata)
-            discovered_skill = DiscoveredRepoSkill(
-                key=self._build_repo_skill_key(repo, repo_root, skill_file),
-                name=name_builder(skill_name, repo_root.name),
-                activation_type=self._get_repo_activation_type(
-                    metadata=metadata,
-                    triggers=triggers,
-                ),
-                triggers=triggers,
-                origin_path=self._to_repo_relative_path(repo_root, skill_file),
-                content=content,
+            relative_path = self._to_repo_relative_path(repo_root, skill_file)
+            skill_md_url = self._build_skill_md_url(repo, relative_path, repo_root)
+            discovered_skill = SkillDiscoveryItem(
+                skill_id=str(uuid4()),
+                skill_name=skill_name,
+                relative_path=relative_path,
+                metadata=metadata,
+                source_repo=source_repo,
+                skill_md_url=str(skill_md_url),
             )
             discovered.append(discovered_skill)
         _logger.info(
@@ -1029,49 +967,6 @@ class SkillRepoService:
             return value if parsed is None else parsed
         return value
 
-    def _parse_git_owner_repo(self, url: str | None) -> tuple[str, str]:
-        # Best-effort parsing for common git URL formats.
-        if not url:
-            return ('unknown', 'repo')
-        if url.startswith('git@'):
-            # git@host:owner/repo.git
-            parts = url.split(':', maxsplit=1)
-            path = parts[1] if len(parts) > 1 else ''
-        else:
-            parsed = urlparse(url)
-            path = parsed.path
-        path = path.strip('/').removesuffix('.git')
-        chunks = [chunk for chunk in path.split('/') if chunk]
-        if len(chunks) >= 2:
-            return (chunks[-2], chunks[-1])
-        if len(chunks) == 1:
-            return ('unknown', chunks[0])
-        return ('unknown', 'repo')
-
-    def _normalize_repo_triggers(self, raw_triggers: object) -> list[str]:
-        if isinstance(raw_triggers, str):
-            return [raw_triggers.strip()] if raw_triggers.strip() else []
-        if not isinstance(raw_triggers, list):
-            return []
-
-        normalized: list[str] = []
-        for raw_trigger in raw_triggers:
-            if not isinstance(raw_trigger, str):
-                continue
-            cleaned = raw_trigger.strip()
-            if cleaned and cleaned not in normalized:
-                normalized.append(cleaned)
-        return normalized
-
-    def _get_repo_activation_type(
-        self, metadata: dict[str, object], triggers: list[str]
-    ) -> SkillDiscoveryActivationType:
-        if metadata.get('type') == 'task' or metadata.get('inputs'):
-            return SkillDiscoveryActivationType.TASK
-        if triggers:
-            return SkillDiscoveryActivationType.TRIGGERED
-        return SkillDiscoveryActivationType.ALWAYS
-
     def _derive_repo_skill_name(
         self, skill_file: Path, metadata: dict[str, object]
     ) -> str:
@@ -1082,18 +977,6 @@ class SkillRepoService:
             return skill_file.parent.name
         return skill_file.stem
 
-    def _build_repo_skill_key(
-        self, repo: StoredSkillRepo, repo_root: Path, skill_file: Path
-    ) -> str:
-        relative_path = skill_file.relative_to(repo_root)
-        if relative_path.name == 'SKILL.md':
-            slug_path = relative_path.parent
-        else:
-            slug_path = relative_path.with_suffix('')
-
-        slug = slug_path.as_posix() if str(slug_path) not in {'', '.'} else 'skill'
-        return f'repo:{repo.repo_id}:{slug}'
-
     def _to_repo_relative_path(self, repo_root: Path, skill_file: Path) -> str:
         return skill_file.relative_to(repo_root).as_posix()
 
@@ -1101,14 +984,49 @@ class SkillRepoService:
         return SkillSourceRepo(
             repo_id=repo.repo_id,
             name=repo.name,
-            source_type=self._coerce_source_type(repo.source_type),
+            source_type=repo.source_type,
             branch=repo.branch,
             url=repo.url,
             local_path=repo.local_path,
         )
 
-    def _build_readme_url(self, repo: StoredSkillRepo, origin_path: str) -> str | None:
-        source_type = self._coerce_source_type(repo.source_type)
-        if source_type == SkillRepoSourceType.GIT and repo.url is not None:
-            return repo.url
-        return None
+    def _build_skill_md_url(
+        self, repo: StoredSkillRepo, relative_path: str, repo_root: Path
+    ) -> str | None:
+        if repo.source_type == SkillRepoSourceType.LOCAL_IMPORT:
+            return str((repo_root / relative_path).resolve(strict=False))
+
+        if not repo.url:
+            return None
+
+        browse_base_url = self._normalize_repo_browse_base_url(repo.url)
+        if not browse_base_url:
+            return None
+
+        branch = repo.branch or 'HEAD'
+        cleaned_relative_path = relative_path.lstrip('/')
+        return f'{browse_base_url}/blob/{branch}/{cleaned_relative_path}'
+
+    def _normalize_repo_browse_base_url(self, repo_url: str) -> str | None:
+        normalized_url = repo_url.strip()
+        if not normalized_url:
+            return None
+
+        ssh_match = re.match(r'git@([^:]+):(.+)', normalized_url)
+        if ssh_match:
+            host = ssh_match.group(1)
+            path = ssh_match.group(2).strip('/')
+            if path.endswith('.git'):
+                path = path[:-4]
+            return f'https://{host}/{path}'
+
+        parsed = urlparse(normalized_url)
+        if not parsed.netloc:
+            return None
+
+        path = parsed.path.strip('/')
+        if path.endswith('.git'):
+            path = path[:-4]
+        if not path:
+            return None
+        return f'{parsed.scheme}://{parsed.netloc}/{path}'
