@@ -17,6 +17,8 @@ def register_exception_handlers(app: FastAPI) -> None:
 
 def _status_code_for_domain_error(exc: DomainError) -> int:
     code = exc.code
+    if code == "CVE_GITCODE_TOKEN_INVALID":
+        return 401
     if code.endswith("_NOT_FOUND"):
         return 404
     if code.endswith("_NOT_SUPPORTED"):

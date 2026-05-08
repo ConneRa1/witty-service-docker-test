@@ -4,6 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from src.api.agents import router as agents_router
+from src.api.cve import router as cve_router
 from src.api.errors import register_exception_handlers
 from src.api.models import router as models_router
 from src.api.services import ServiceContainer, build_default_services
@@ -33,6 +34,7 @@ def create_app(*, services: ServiceContainer | None = None) -> FastAPI:
         return {"status": "ok"}
 
     app.include_router(agents_router)
+    app.include_router(cve_router)
     app.include_router(models_router)
 
     return app

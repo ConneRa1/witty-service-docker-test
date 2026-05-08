@@ -208,7 +208,7 @@ class AgentManager:
             )
             logger.info(f"[AgentManager] Sandbox state saved to database")
 
-            # 等待适配器就绪（同步等待 /v1/ping）
+            # 等待适配器就绪（同步等待 /ping）
             logger.info(f"[AgentManager] Waiting for sandbox to be ready...")
             client: httpx.Client | None = None
             for i in range(30):  # 30 秒超时

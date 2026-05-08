@@ -152,7 +152,7 @@ class LocalProcessSandboxBackend(SandboxBackend):
     ) -> AdapterEndpoint:
         sandbox_handle = self._resolve_handle(handle)
         base_url = str(sandbox_handle.metadata["base_url"])
-        return AdapterEndpoint(base_url=base_url, health_url=f"{base_url}/v1/ping")
+        return AdapterEndpoint(base_url=base_url, health_url=f"{base_url}/ping")
 
     def cleanup(self, handle: SandboxHandle | str, **kwargs: Any) -> None:
         sandbox_handle = self._resolve_handle(handle)
