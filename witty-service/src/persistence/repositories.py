@@ -8,7 +8,6 @@ from uuid import uuid4
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
-
 from src.domain.enums import AgentStatus
 from src.persistence.orm import (
     AgentORM,
@@ -18,6 +17,7 @@ from src.persistence.orm import (
     ModelORM,
     SessionORM,
     SessionStatus,
+    SkillRepositoryORM,
 )
 from src.sandbox.base import SandboxHandle
 
@@ -77,11 +77,26 @@ class SandboxStateRecord:
     def handle(self) -> SandboxHandle:
         payload = dict(self.sandbox_payload_json)
         return SandboxHandle(
-            sandbox_id=str(payload["sandbox_id"]),
-            agent_id=str(payload.get("agent_id", self.agent_id)),
-            workspace_path=str(payload["workspace_path"]),
-            metadata=dict(payload.get("metadata", {})),
+            sandbox_id=str(payload['sandbox_id']),
+            agent_id=str(payload.get('agent_id', self.agent_id)),
+            workspace_path=str(payload['workspace_path']),
+            metadata=dict(payload.get('metadata', {})),
         )
+
+
+@dataclass(slots=True)
+class SkillRepositoryRecord:
+    repo_id: str
+    repo_name: str
+    source_type: str
+    branch: str | None
+    url: str | None
+    local_path: str | None
+    skill_discover_status: str
+    skill_num: int
+    discovered_skills: list[dict[str, Any]]
+    created_at: datetime
+    updated_at: datetime
 
 
 class SqliteRepository:
@@ -96,7 +111,7 @@ class SqliteRepository:
         adapter_type: str,
         workspace_path: str,
         idle_timeout_seconds: int,
-        description: str = "",
+        description: str = '',
         status: AgentStatus | str = AgentStatus.creating,
         sandbox_id: str | None = None,
         has_scheduled_tasks: bool = False,
@@ -125,7 +140,7 @@ class SqliteRepository:
         adapter_type: str,
         workspace_path: str,
         idle_timeout_seconds: int,
-        description: str = "",
+        description: str = '',
         status: AgentStatus | str = AgentStatus.creating,
         sandbox_id: str | None = None,
         has_scheduled_tasks: bool = False,
@@ -176,7 +191,7 @@ class SqliteRepository:
         with self._session_factory() as session:
             row = session.get(AgentORM, agent_id)
             if row is None:
-                raise KeyError(f"Agent not found: {agent_id}")
+                raise KeyError(f'Agent not found: {agent_id}')
             row.status = self._serialize_status(status)
             if updated_at is not None:
                 row.updated_at = updated_at
@@ -241,7 +256,9 @@ class SqliteRepository:
                 session.add(row)
             else:
                 existing.status = SessionStatus(status)
-                existing.remote_runtime_agent_id = remote_runtime_agent_id or existing.remote_runtime_agent_id
+                existing.remote_runtime_agent_id = (
+                    remote_runtime_agent_id or existing.remote_runtime_agent_id
+                )
                 existing.updated_at = now
 
             session.commit()
@@ -338,7 +355,7 @@ class SqliteRepository:
 
         if last_error is not None:
             raise last_error
-        raise RuntimeError("Failed to create message event with retry.")
+        raise RuntimeError('Failed to create message event with retry.')
 
     def create_assistant_message_and_bind_events(
         self,
@@ -354,14 +371,16 @@ class SqliteRepository:
                 id=str(uuid4()),
                 agent_id=agent_id,
                 session_id=session_id,
-                role="assistant",
+                role='assistant',
                 content=content,
                 metadata_json=dict(metadata_json or {}),
             )
             session.add(row)
             session.flush()
             if event_ids:
-                session.query(MessageEventORM).filter(MessageEventORM.id.in_(event_ids)).update(
+                session.query(MessageEventORM).filter(
+                    MessageEventORM.id.in_(event_ids)
+                ).update(
                     {MessageEventORM.message_id: row.id},
                     synchronize_session=False,
                 )
@@ -405,8 +424,8 @@ class SqliteRepository:
     def _is_message_event_seq_conflict(exc: IntegrityError) -> bool:
         message = str(exc.orig if exc.orig is not None else exc)
         return (
-            "uq_message_events_session_seq" in message
-            or "message_events.session_id, message_events.seq_no" in message
+            'uq_message_events_session_seq' in message
+            or 'message_events.session_id, message_events.seq_no' in message
         )
 
     def delete_agent(self, agent_id: str) -> None:
@@ -419,7 +438,11 @@ class SqliteRepository:
 
     @staticmethod
     def _serialize_status(status: AgentStatus | str) -> str:
-        return status.value if isinstance(status, AgentStatus) else AgentStatus(status).value
+        return (
+            status.value
+            if isinstance(status, AgentStatus)
+            else AgentStatus(status).value
+        )
 
     @staticmethod
     def _to_agent_record(row: AgentORM) -> AgentRecord:
@@ -445,7 +468,9 @@ class SqliteRepository:
             id=row.id,
             agent_id=row.agent_id,
             remote_runtime_agent_id=row.remote_runtime_agent_id,
-            status=row.status.value if isinstance(row.status, SessionStatus) else row.status,
+            status=row.status.value
+            if isinstance(row.status, SessionStatus)
+            else row.status,
             created_at=row.created_at,
             updated_at=row.updated_at,
         )
@@ -467,7 +492,7 @@ class SqliteRepository:
         provider: str,
         api_key: str,
         api_base_url: str | None = None,
-        description: str = "",
+        description: str = '',
         enabled: bool = True,
         max_tokens: int = 4096,
         temperature: float = 0.7,
@@ -494,7 +519,7 @@ class SqliteRepository:
         provider: str,
         api_key: str,
         api_base_url: str | None = None,
-        description: str = "",
+        description: str = '',
         enabled: bool = True,
         max_tokens: int = 4096,
         temperature: float = 0.7,
@@ -551,6 +576,128 @@ class SqliteRepository:
             max_tokens=row.max_tokens,
             temperature=row.temperature,
             is_default=row.is_default,
+            created_at=row.created_at,
+            updated_at=row.updated_at,
+        )
+
+    def list_skill_repositories(self) -> list[SkillRepositoryRecord]:
+        with self._session_factory() as session:
+            rows = (
+                session.query(SkillRepositoryORM)
+                .order_by(
+                    SkillRepositoryORM.created_at.desc(),
+                    SkillRepositoryORM.repo_name.asc(),
+                )
+                .all()
+            )
+            return [self._to_skill_repository_record(row) for row in rows]
+
+    def get_skill_repository(self, repo_id: str) -> SkillRepositoryRecord | None:
+        with self._session_factory() as session:
+            row = session.get(SkillRepositoryORM, repo_id)
+            if row is None:
+                return None
+            return self._to_skill_repository_record(row)
+
+    def get_skill_repository_by_name(self, name: str) -> SkillRepositoryRecord | None:
+        with self._session_factory() as session:
+            row = (
+                session.query(SkillRepositoryORM)
+                .filter(SkillRepositoryORM.repo_name == name)
+                .one_or_none()
+            )
+            if row is None:
+                return None
+            return self._to_skill_repository_record(row)
+
+    def create_skill_repository(
+        self,
+        *,
+        name: str,
+        source_type: str,
+        branch: str | None,
+        url: str | None,
+        local_path: str | None,
+    ) -> SkillRepositoryRecord:
+        with self._session_factory() as session:
+            row = SkillRepositoryORM(
+                repo_id=str(uuid4()),
+                repo_name=name,
+                source_type=source_type,
+                branch=branch,
+                url=url,
+                local_path=local_path,
+                skill_discover_status='init',
+                skill_num=0,
+                discovered_skills=[],
+            )
+            session.add(row)
+            session.commit()
+            session.refresh(row)
+            return self._to_skill_repository_record(row)
+
+    def update_skill_repository(
+        self,
+        repo_id: str,
+        *,
+        source_type: str,
+        branch: str | None,
+        url: str | None,
+        local_path: str | None,
+    ) -> SkillRepositoryRecord:
+        with self._session_factory() as session:
+            row = session.get(SkillRepositoryORM, repo_id)
+            if row is None:
+                raise KeyError(f'Skill repository not found: {repo_id}')
+            row.source_type = source_type
+            row.branch = branch
+            row.url = url
+            row.local_path = local_path
+            row.updated_at = datetime.now(timezone.utc)
+            session.commit()
+            session.refresh(row)
+            return self._to_skill_repository_record(row)
+
+    def update_skill_repository_discovery(
+        self,
+        repo_id: str,
+        *,
+        skill_discover_status: str,
+        skill_num: int,
+        discovered_skills: list[dict[str, Any]],
+    ) -> SkillRepositoryRecord:
+        with self._session_factory() as session:
+            row = session.get(SkillRepositoryORM, repo_id)
+            if row is None:
+                raise KeyError(f'Skill repository not found: {repo_id}')
+            row.skill_discover_status = skill_discover_status
+            row.skill_num = skill_num
+            row.discovered_skills = list(discovered_skills)
+            row.updated_at = datetime.now(timezone.utc)
+            session.commit()
+            session.refresh(row)
+            return self._to_skill_repository_record(row)
+
+    def delete_skill_repository(self, repo_id: str) -> None:
+        with self._session_factory() as session:
+            row = session.get(SkillRepositoryORM, repo_id)
+            if row is None:
+                return
+            session.delete(row)
+            session.commit()
+
+    @staticmethod
+    def _to_skill_repository_record(row: SkillRepositoryORM) -> SkillRepositoryRecord:
+        return SkillRepositoryRecord(
+            repo_id=row.repo_id,
+            repo_name=row.repo_name,
+            source_type=row.source_type,
+            branch=row.branch,
+            url=row.url,
+            local_path=row.local_path,
+            skill_discover_status=row.skill_discover_status,
+            skill_num=row.skill_num,
+            discovered_skills=list(row.discovered_skills or []),
             created_at=row.created_at,
             updated_at=row.updated_at,
         )

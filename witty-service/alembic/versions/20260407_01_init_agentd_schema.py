@@ -108,8 +108,26 @@ def upgrade() -> None:
     op.create_index("ix_message_events_message_id", "message_events", ["message_id"], unique=False)
     op.create_index("ix_message_events_session_id", "message_events", ["session_id"], unique=False)
 
+    op.create_table(
+        "skill_repo",
+        sa.Column("repo_id", sa.String(length=36), nullable=False),
+        sa.Column("name", sa.String(length=255), nullable=False),
+        sa.Column("source_type", sa.String(length=32), nullable=False),
+        sa.Column("branch", sa.String(length=255), nullable=True),
+        sa.Column("url", sa.Text(), nullable=True),
+        sa.Column("local_path", sa.Text(), nullable=True),
+        sa.Column("discover_status", sa.String(length=32), nullable=False, server_default="done"),
+        sa.Column("skill_num", sa.Integer(), nullable=False, server_default="0"),
+        sa.Column("discovered_skills", sa.JSON(), nullable=False),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+        sa.PrimaryKeyConstraint("repo_id"),
+    )
+
 
 def downgrade() -> None:
+    op.drop_table("skill_repo")
+
     op.drop_index("ix_message_events_session_id", table_name="message_events")
     op.drop_index("ix_message_events_message_id", table_name="message_events")
     op.drop_index("ix_message_events_agent_id", table_name="message_events")

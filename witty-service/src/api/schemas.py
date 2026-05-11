@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from enum import Enum
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -8,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 class CreateAgentRequest(BaseModel):
     name: str = Field(min_length=1)
-    description: str = ""
+    description: str = ''
     sandbox_type: str = Field(min_length=1)
     adapter_type: str = Field(min_length=1)
     idle_timeout_seconds: int = Field(gt=0)
@@ -62,7 +63,7 @@ class CreateModelRequest(BaseModel):
     provider: str = Field(min_length=1)
     api_key: str = Field(min_length=1)
     api_base_url: str | None = None
-    description: str = ""
+    description: str = ''
     enabled: bool = True
     max_tokens: int = 4096
     temperature: float = 0.7
@@ -108,3 +109,38 @@ class SessionEventPage(BaseModel):
 class SessionEventsResponse(BaseModel):
     items: list[SessionEventItem]
     pagination: PaginationInfo
+
+
+class SkillRepositorySourceType(str, Enum):
+    GIT = 'git'
+    LOCAL_IMPORT = 'local_import'
+
+
+class CreateSkillRepositoryRequest(BaseModel):
+    source_type: SkillRepositorySourceType
+    branch: str | None = None
+    url: str | None = None
+    local_path: str | None = None
+
+
+class UpdateSkillRepositoryRequest(BaseModel):
+    source_type: SkillRepositorySourceType | None = None
+    branch: str | None = None
+    url: str | None = None
+    local_path: str | None = None
+
+
+class SkillRepositoryResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    repo_id: str
+    repo_name: str = Field(min_length=1, max_length=255)
+    source_type: SkillRepositorySourceType
+    branch: str | None = None
+    url: str | None = None
+    local_path: str | None = None
+    skill_discover_status: str
+    skill_num: int
+    discovered_skills: list[dict[str, Any]] = Field(default_factory=list)
+    created_at: datetime
+    updated_at: datetime

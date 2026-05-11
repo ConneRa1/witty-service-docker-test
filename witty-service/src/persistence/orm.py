@@ -4,7 +4,17 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
-from sqlalchemy import Boolean, DateTime, Enum as SQLEnum, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
+from sqlalchemy import Enum as SQLEnum
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -17,24 +27,26 @@ class Base(DeclarativeBase):
 
 
 class SessionStatus(str, Enum):
-    running = "running"
-    idle = "idle"
-    error = "error"
+    running = 'running'
+    idle = 'idle'
+    error = 'error'
 
 
 class AgentORM(Base):
-    __tablename__ = "agents"
+    __tablename__ = 'agents'
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
-    description: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    description: Mapped[str] = mapped_column(Text, nullable=False, default='')
     sandbox_type: Mapped[str] = mapped_column(String(32), nullable=False)
     adapter_type: Mapped[str] = mapped_column(String(32), nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     sandbox_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     workspace_path: Mapped[str] = mapped_column(Text, nullable=False)
     idle_timeout_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
-    has_scheduled_tasks: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    has_scheduled_tasks: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
     last_active_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
         nullable=True,
@@ -53,37 +65,41 @@ class AgentORM(Base):
 
 
 class AgentRuntimeStateORM(Base):
-    __tablename__ = "agent_runtime_state"
+    __tablename__ = 'agent_runtime_state'
 
     agent_id: Mapped[str] = mapped_column(
         String(36),
-        ForeignKey("agents.id", ondelete="CASCADE"),
+        ForeignKey('agents.id', ondelete='CASCADE'),
         primary_key=True,
     )
-    runtime_payload_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    runtime_payload_json: Mapped[dict[str, Any]] = mapped_column(
+        JSON, nullable=False, default=dict
+    )
     adapter_base_url: Mapped[str | None] = mapped_column(String(255), nullable=True)
     adapter_ready: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class SessionORM(Base):
-    __tablename__ = "sessions"
+    __tablename__ = 'sessions'
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     agent_id: Mapped[str] = mapped_column(
         String(36),
-        ForeignKey("agents.id", ondelete="CASCADE"),
+        ForeignKey('agents.id', ondelete='CASCADE'),
         nullable=False,
         index=True,
     )
-    remote_runtime_agent_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    remote_runtime_agent_id: Mapped[str | None] = mapped_column(
+        String(255), nullable=True
+    )
     status: Mapped[SessionStatus] = mapped_column(
         SQLEnum(
             SessionStatus,
             native_enum=False,
             validate_strings=True,
             create_constraint=True,
-            name="session_status",
+            name='session_status',
         ),
         nullable=False,
         default=SessionStatus.idle,
@@ -102,24 +118,26 @@ class SessionORM(Base):
 
 
 class MessageORM(Base):
-    __tablename__ = "messages"
+    __tablename__ = 'messages'
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     agent_id: Mapped[str] = mapped_column(
         String(36),
-        ForeignKey("agents.id", ondelete="CASCADE"),
+        ForeignKey('agents.id', ondelete='CASCADE'),
         nullable=False,
         index=True,
     )
     session_id: Mapped[str] = mapped_column(
         String(36),
-        ForeignKey("sessions.id", ondelete="CASCADE"),
+        ForeignKey('sessions.id', ondelete='CASCADE'),
         nullable=False,
         index=True,
     )
     role: Mapped[str] = mapped_column(String(16), nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
-    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(
+        JSON, nullable=False, default=dict
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -128,32 +146,34 @@ class MessageORM(Base):
 
 
 class MessageEventORM(Base):
-    __tablename__ = "message_events"
+    __tablename__ = 'message_events'
     __table_args__ = (
-        UniqueConstraint("session_id", "seq_no", name="uq_message_events_session_seq"),
+        UniqueConstraint('session_id', 'seq_no', name='uq_message_events_session_seq'),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     agent_id: Mapped[str] = mapped_column(
         String(36),
-        ForeignKey("agents.id", ondelete="CASCADE"),
+        ForeignKey('agents.id', ondelete='CASCADE'),
         nullable=False,
         index=True,
     )
     session_id: Mapped[str] = mapped_column(
         String(36),
-        ForeignKey("sessions.id", ondelete="CASCADE"),
+        ForeignKey('sessions.id', ondelete='CASCADE'),
         nullable=False,
         index=True,
     )
     message_id: Mapped[str | None] = mapped_column(
         String(36),
-        ForeignKey("messages.id", ondelete="SET NULL"),
+        ForeignKey('messages.id', ondelete='SET NULL'),
         nullable=True,
         index=True,
     )
     event_type: Mapped[str] = mapped_column(String(32), nullable=False)
-    payload_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    payload_json: Mapped[dict[str, Any]] = mapped_column(
+        JSON, nullable=False, default=dict
+    )
     seq_no: Mapped[int] = mapped_column(Integer, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -163,29 +183,60 @@ class MessageEventORM(Base):
 
 
 class AgentLockORM(Base):
-    __tablename__ = "agent_locks"
+    __tablename__ = 'agent_locks'
 
     agent_id: Mapped[str] = mapped_column(
         String(36),
-        ForeignKey("agents.id", ondelete="CASCADE"),
+        ForeignKey('agents.id', ondelete='CASCADE'),
         primary_key=True,
     )
     lock_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
 
 class ModelORM(Base):
-    __tablename__ = "models"
+    __tablename__ = 'models'
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     provider: Mapped[str] = mapped_column(String(32), nullable=False)
     api_key: Mapped[str] = mapped_column(Text, nullable=False)
     api_base_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
-    description: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    description: Mapped[str] = mapped_column(Text, nullable=False, default='')
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     max_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=4096)
     temperature: Mapped[float] = mapped_column(Integer, nullable=False, default=7)
     is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=utcnow,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=utcnow,
+        onupdate=utcnow,
+    )
+
+
+class SkillRepositoryORM(Base):
+    __tablename__ = 'skill_repo'
+
+    repo_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    repo_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    source_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    branch: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    local_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    skill_discover_status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default='done'
+    )
+    skill_num: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    discovered_skills: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=list,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

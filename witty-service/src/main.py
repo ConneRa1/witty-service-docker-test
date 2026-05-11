@@ -7,10 +7,13 @@ from src.api.agents import router as agents_router
 from src.api.errors import register_exception_handlers
 from src.api.models import router as models_router
 from src.api.services import ServiceContainer, build_default_services
+from src.api.skills import router as skills_router
 from src.config import get_settings
 
 # 配置日志级别
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+logging.basicConfig(
+    level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 
 
 def create_app(*, services: ServiceContainer | None = None) -> FastAPI:
@@ -28,11 +31,12 @@ def create_app(*, services: ServiceContainer | None = None) -> FastAPI:
         allow_headers=settings.cors_headers,
     )
 
-    @app.get("/healthz")
+    @app.get('/healthz')
     def healthz() -> dict[str, str]:
-        return {"status": "ok"}
+        return {'status': 'ok'}
 
     app.include_router(agents_router)
     app.include_router(models_router)
+    app.include_router(skills_router)
 
     return app
