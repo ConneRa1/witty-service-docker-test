@@ -5,6 +5,7 @@ from enum import Enum
 from typing import Any
 
 from sqlalchemy import Boolean, DateTime, Enum as SQLEnum, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
+from sqlalchemy import Enum as SQLEnum
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -186,6 +187,37 @@ class ModelORM(Base):
     max_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=4096)
     temperature: Mapped[float] = mapped_column(Integer, nullable=False, default=7)
     is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=utcnow,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=utcnow,
+        onupdate=utcnow,
+    )
+
+
+class SkillRepositoryORM(Base):
+    __tablename__ = 'skill_repo'
+
+    repo_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    repo_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    source_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    branch: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    local_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    skill_discover_status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default='done'
+    )
+    skill_num: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    discovered_skills: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=list,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

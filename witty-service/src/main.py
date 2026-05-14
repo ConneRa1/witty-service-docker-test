@@ -8,6 +8,7 @@ from src.api.cve import router as cve_router
 from src.api.errors import register_exception_handlers
 from src.api.models import router as models_router
 from src.api.services import ServiceContainer, build_default_services
+from src.api.skills import router as skills_router
 from src.config import get_settings
 
 # 配置日志级别
@@ -36,5 +37,6 @@ def create_app(*, services: ServiceContainer | None = None) -> FastAPI:
     app.include_router(agents_router)
     app.include_router(cve_router)
     app.include_router(models_router)
+    app.include_router(skills_router)
 
     return app
