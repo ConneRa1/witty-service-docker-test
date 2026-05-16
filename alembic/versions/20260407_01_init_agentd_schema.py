@@ -125,7 +125,7 @@ def upgrade() -> None:
     op.create_table(
         "skills",
         sa.Column("skill_id", sa.String(length=36), nullable=False),
-        sa.Column("repo_id", sa.String(length=36), nullable=False),
+        sa.Column("repo_id", sa.String(length=36), nullable=True),
         sa.Column("skill_name", sa.String(length=255), nullable=False),
         sa.Column("relative_path", sa.Text(), nullable=True),
         sa.Column("metadata", sa.JSON(), nullable=False),

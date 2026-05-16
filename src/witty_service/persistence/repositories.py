@@ -102,7 +102,7 @@ class SkillRepositoryRecord:
 @dataclass(slots=True)
 class SkillRecord:
     skill_id: str
-    repo_id: str
+    repo_id: str | None
     skill_name: str
     relative_path: str | None
     metadata: dict[str, Any]

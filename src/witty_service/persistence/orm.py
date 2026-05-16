@@ -242,10 +242,10 @@ class SkillORM(Base):
     )
 
     skill_id: Mapped[str] = mapped_column(String(36), primary_key=True)
-    repo_id: Mapped[str] = mapped_column(
+    repo_id: Mapped[str | None] = mapped_column(
         String(36),
         ForeignKey('skill_repo.repo_id', ondelete='CASCADE'),
-        nullable=False,
+        nullable=True,
         index=True,
     )
     skill_name: Mapped[str] = mapped_column(String(255), nullable=False)
