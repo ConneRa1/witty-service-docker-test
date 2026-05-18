@@ -456,6 +456,16 @@ def _prompt_phase(
         lines.append("")
     body = "\n".join(lines).rstrip()
 
+    body += """
+    ## Interruption Handling Rules
+
+    If your previous assistant response in the conversation history appears truncated, cut off, or incomplete (as if the user stopped you mid-response), you MUST:
+    1. Ignore that incomplete response entirely — do not continue it, do not complete it, do not reference it
+    2. Answer ONLY the user's latest message directly
+    3. Never mention that a previous response was interrupted, or phrases like "continuing from before"
+    4. If the user's new question relates to earlier discussion topics, you may use that contextual knowledge, but must directly address the new question rather than resuming the interrupted response
+    """
+
     begin = "<!-- BEGIN: IMPORTED_SYSTEM_PROMPT -->"
     end = "<!-- END: IMPORTED_SYSTEM_PROMPT -->"
 
