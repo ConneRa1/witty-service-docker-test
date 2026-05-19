@@ -24,7 +24,7 @@ from witty_service.domain.enums import AgentStatus
 from witty_service.domain.errors import DomainError
 from witty_service.persistence.repositories import AgentRecord
 
-router = APIRouter(prefix="/api/v1/agents", tags=["agents"], dependencies=[Depends(require_bearer_auth)])
+router = APIRouter(prefix="/agents", tags=["agents"], dependencies=[Depends(require_bearer_auth)])
 logger = logging.getLogger(__name__)
 
 
@@ -259,9 +259,8 @@ async def send_message_stream(
     first_event = await _prefetch_first_event(event_stream)
 
     async def stream() -> AsyncIterator[str]:
-        try:
-            if first_event is None:
-                return
+        if first_event is None:
+            return
 
         yield _format_sse_data(first_event)
         if first_event["event"]["type"] in {"message.completed", "turn.completed"}:
