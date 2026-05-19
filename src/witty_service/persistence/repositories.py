@@ -729,6 +729,7 @@ class SqliteRepository:
         with self._session_factory() as session:
             rows = (
                 session.query(SkillORM)
+                .filter(SkillORM.repo_id.is_not(None))
                 .order_by(SkillORM.created_at.asc(), SkillORM.skill_name.asc())
                 .all()
             )
