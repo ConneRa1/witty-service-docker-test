@@ -20,6 +20,7 @@ from witty_agent_server.application.services.session import SessionServiceError
 from witty_agent_server.runtimes.runtime_base import (
     RuntimeBase,
     RuntimeType,
+    supports_runtime_lifecycle,
     supports_runtime_turn,
 )
 
@@ -136,6 +137,37 @@ class SessionWSOrchestrator:
                 state=target_state,
                 reason="turn.failed" if turn_failed else "turn.completed",
             )
+
+    def abort_turn(self, *, agent_id: str, session_id: str) -> None:
+ 	    session = self._require_session(agent_id=agent_id, session_id=session_id)
+ 	    runtime_type = cast(RuntimeType, session.get("runtime_type"))
+ 	    runtime = self._require_runtime(runtime_type)
+ 	    if runtime is not None and supports_runtime_lifecycle(runtime):
+ 	        runtime_session_key = session.get("runtime_session_key")
+ 	        if isinstance(runtime_session_key, str) and runtime_session_key:
+ 	            logger.info(
+ 	                "abort runtime turn: agent_id=%s session_id=%s runtime_type=%s session_key=%s",
+ 	                agent_id,
+ 	                session_id,
+ 	                runtime_type,
+ 	                runtime_session_key,
+ 	            )
+ 	            try:
+ 	                runtime.abort_session(session_key=runtime_session_key)
+ 	            except Exception:
+ 	                logger.exception(
+ 	                    "abort runtime turn failed: agent_id=%s session_id=%s",
+ 	                    agent_id,
+ 	                    session_id,
+ 	                )
+ 	    # 中断会话后上报状态为 idle。
+ 	    self._state_sync_service.emit_state_changed(
+ 	        agent_id=agent_id,
+ 	        session_id=session_id,
+ 	        runtime_type=runtime_type,
+ 	        state="idle",
+ 	        reason="message.abort",
+	    )
 
     def precheck_message(self, *, agent_id: str, session_id: str, message: str) -> None:
         if not isinstance(message, str) or not message.strip():

@@ -120,6 +120,9 @@ async def _dispatch_event(
     if not isinstance(payload, dict):
         payload = {}
 
+    if event_type == "message.abort":
+ 	    cancelled = task_pool.abort_session(agent_id=agent_id, session_id=session_id)
+ 	    return
     if event_type != "message.create":
         await outbound.put(
             _client_error(

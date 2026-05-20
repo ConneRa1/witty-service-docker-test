@@ -25,6 +25,29 @@ class CveIssue(BaseModel):
 class CveIssueListResponse(BaseModel):
     items: list[CveIssue]
 
+class CveArtifact(BaseModel):
+    kind: str
+    label: str
+    status: str
+    path: str = ""
+    file_name: str = ""
+    viewable: bool = False
+
+class CveWorkbenchBranch(BaseModel):
+    name: str
+    status: str = ""
+    artifacts: list[CveArtifact] = Field(default_factory=list)
+
+class CveWorkbenchResponse(BaseModel):
+    cve_id: str
+    cache_key: str
+    branches: list[CveWorkbenchBranch] = Field(default_factory=list)
+
+class CveArtifactResponse(BaseModel):
+    path: str
+    file_name: str
+    content: str
+
 class CveConfigResponse(BaseModel):
     has_gitcode_token: bool = False
     signer_name: str = ""

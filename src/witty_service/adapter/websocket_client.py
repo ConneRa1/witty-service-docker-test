@@ -61,9 +61,9 @@ class WebSocketClient:
                 self._session_id,
                 self._url,
             )
+            self._connected = False
             await self._ws.close()
             self._ws = None
-            self._connected = False
 
     async def send(self, message: OutboundMessage) -> None:
         if not self._ws or not self._connected:

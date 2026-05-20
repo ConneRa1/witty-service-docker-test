@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import json
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
@@ -133,6 +135,160 @@ class CveService:
             if len(filtered) >= safe_limit:
                 break
         return filtered
+
+    def get_workbench(self, cve_id: str, branches: str, clone_dir: str = "") -> dict[str, Any]:
+        branch_list = [item.strip() for item in branches.split(",") if item.strip()]
+        sorted_branches = ",".join(sorted(branch_list))
+        cache_key = hashlib.md5("|".join([cve_id.strip(), sorted_branches]).encode()).hexdigest()
+
+        home = Path.home()
+        cache_path = home / ".cve_analyzer_cache" / "branches_analysis_cache.json"
+        cache_items: list[dict[str, Any]] = []
+        if cache_path.exists():
+            try:
+                cache_data = json.loads(cache_path.read_text(encoding="utf-8"))
+                raw_items = cache_data.get(cache_key, {}).get("data", [])
+                if isinstance(raw_items, list):
+                    cache_items = [item for item in raw_items if isinstance(item, dict)]
+            except (OSError, json.JSONDecodeError):
+                cache_items = []
+
+        latest_log = ""
+        log_dir = home / ".cvekit" / "logs"
+        if log_dir.exists():
+            log_files = sorted(
+                log_dir.glob(f"linux-{cve_id.strip()}-*.log"),
+                key=lambda item: item.stat().st_mtime if item.exists() else 0,
+                reverse=True,
+            )
+            if log_files:
+                latest_log = str(log_files[0])
+
+        branches_response: list[dict[str, Any]] = []
+        for branch_name in branch_list:
+            item = next(
+                (
+                    row
+                    for row in cache_items
+                    if str(row.get("Target branch") or row.get("目标分支") or "").strip() == branch_name
+                ),
+                {},
+            )
+
+            status = str(item.get("Adaptation status") or item.get("适配状态") or item.get("Whether affected") or item.get("是否受影响") or "")
+            conflict_point = str(item.get("Conflict point") or item.get("冲突点") or "")
+            suggested_file = str(item.get("Suggested adjustment files") or item.get("建议调整文件") or "")
+            conflict_status = str(item.get("Whether conflicts exist") or item.get("是否存在冲突") or "")
+
+            patch_path = suggested_file if suggested_file and suggested_file not in {"N/A", "None"} else conflict_point
+            patch_file_name = Path(patch_path).name if patch_path else ""
+            patch_exists = bool(patch_path and Path(patch_path).exists())
+
+            original_path = ""
+            backport_path = ""
+            backport_status = "missing"
+            original_status = "missing"
+            conflict_value = conflict_point.lower()
+
+            if patch_file_name.startswith("backported_"):
+                backport_path = patch_path
+                backport_status = "已生成" if patch_exists else "missing"
+                stem = patch_file_name[len("backported_") :]
+                original_candidate = Path(patch_path).with_name(f"original_{stem}")
+                if original_candidate.exists():
+                    original_path = str(original_candidate)
+                else:
+                    original_files = sorted(
+                        Path(patch_path).parent.glob("original_*.patch"),
+                        key=lambda path: path.stat().st_mtime if path.exists() else 0,
+                        reverse=True,
+                    )
+                    if original_files:
+                        original_path = str(original_files[0])
+                    else:
+                        parts = stem.rsplit("_", 1)
+                        if len(parts) == 2 and clone_dir.strip():
+                            clone_candidate = Path(clone_dir.strip()) / f"commit_patch_{parts[1]}"
+                            if clone_candidate.exists():
+                                original_path = str(clone_candidate)
+                original_status = "已获取" if original_path and Path(original_path).exists() else "missing"
+            elif patch_file_name.startswith("commit_patch_") or conflict_value.startswith("commit"):
+                original_path = patch_path
+                original_status = "已获取" if patch_exists else "missing"
+                backport_status = "无需回移植"
+            elif patch_exists:
+                original_path = patch_path
+                original_status = "已获取"
+
+            log_exists = bool(latest_log and Path(latest_log).exists())
+
+            artifacts = [
+                {
+                    "kind": "original_patch",
+                    "label": "原始补丁",
+                    "status": original_status,
+                    "path": original_path,
+                    "file_name": Path(original_path).name if original_path else "",
+                    "viewable": bool(original_path and Path(original_path).exists()),
+                },
+                {
+                    "kind": "backport_patch",
+                    "label": "回移植补丁",
+                    "status": backport_status,
+                    "path": backport_path,
+                    "file_name": Path(backport_path).name if backport_path else "",
+                    "viewable": bool(backport_path and Path(backport_path).exists()),
+                },
+                {
+                    "kind": "backport_log",
+                    "label": "回移植日志",
+                    "status": "已获取" if log_exists else "missing",
+                    "path": latest_log,
+                    "file_name": Path(latest_log).name if latest_log else "",
+                    "viewable": log_exists,
+                },
+            ]
+            branches_response.append({"name": branch_name, "status": status, "artifacts": artifacts})
+
+        return {"cve_id": cve_id.strip(), "cache_key": cache_key, "branches": branches_response}
+
+    def read_artifact(self, raw_path: str) -> dict[str, str]:
+        artifact_path = Path(raw_path).expanduser().resolve()
+        home = Path.home().resolve()
+        config = self.get_config()
+        allowed_roots = [
+            home / ".cve_analyzer_cache",
+            home / ".cvekit" / "logs",
+            home / "backports" / "patch_dataset",
+        ]
+        allowed = False
+        for root in allowed_roots:
+            try:
+                artifact_path.relative_to(root.resolve())
+                allowed = True
+                break
+            except ValueError:
+                continue
+        clone_dir = config.get("clone_dir", "").strip()
+        if not allowed and clone_dir and artifact_path.name.startswith("commit_patch_"):
+            try:
+                artifact_path.relative_to(Path(clone_dir).expanduser().resolve())
+                allowed = True
+            except ValueError:
+                pass
+
+        if not allowed or not artifact_path.is_file():
+            raise DomainError(
+                code="CVE_ARTIFACT_NOT_FOUND",
+                message="CVE artifact is not readable.",
+                details={"path": raw_path},
+            )
+
+        return {
+            "path": str(artifact_path),
+            "file_name": artifact_path.name,
+            "content": artifact_path.read_text(encoding="utf-8", errors="replace"),
+        }
 
     def _parse_issue_url(self, issue_url: str) -> tuple[str, str]:
         parsed = urlparse(issue_url.strip())

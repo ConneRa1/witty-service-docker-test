@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
@@ -34,6 +35,7 @@ class TaskPool:
         self._orchestrator = orchestrator
         self._inflight_sessions: set[tuple[str, str]] = set()
         self._lock = asyncio.Lock()
+        self._cancel_events: dict[tuple[str, str], threading.Event] = {}
 
     async def submit(
         self,
@@ -71,6 +73,21 @@ class TaskPool:
             )
         )
 
+    def abort_session(self, agent_id: str, session_id: str) -> bool:
+        """
+        中止 runtime turn,通知生产者线程停止运行。
+
+        Returns:
+            该 session 当前是否有正在执行的 turn,有为 True,无则为 False。
+        """
+        key = (agent_id, session_id)
+        event = self._cancel_events.get(key)
+        if event is not None:
+            event.set()
+            self._orchestrator.abort_turn(agent_id=agent_id, session_id=session_id)
+            return True
+        return False
+
     async def _run_turn(
         self,
         *,
@@ -81,6 +98,9 @@ class TaskPool:
     ) -> None:
         loop = asyncio.get_running_loop()
         queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
+        cancel_event = threading.Event()
+        session_scope = (agent_id, session_id)
+        self._cancel_events[session_scope] = cancel_event
 
         def _producer() -> None:
             try:
@@ -89,6 +109,8 @@ class TaskPool:
                     session_id=session_id,
                     message=message,
                 ):
+                    if cancel_event.is_set():
+                        break
                     loop.call_soon_threadsafe(queue.put_nowait, dict(item))
             finally:
                 loop.call_soon_threadsafe(queue.put_nowait, None)
@@ -102,5 +124,6 @@ class TaskPool:
                 await on_event(event)
         finally:
             async with self._lock:
-                self._inflight_sessions.discard((agent_id, session_id))
+                self._inflight_sessions.discard(session_scope)
+            self._cancel_events.pop(session_scope, None)
             await producer_future

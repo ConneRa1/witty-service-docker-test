@@ -4,15 +4,17 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, s
 
 from witty_service.api.auth import require_bearer_auth
 from witty_service.api.cve_schemas import (
+    CveArtifactResponse,
     CveConfigResponse,
     CveConfigUpdateResponse,
     CveIssueListResponse,
+    CveWorkbenchResponse,
     UpdateCveConfigRequest,
 )
 from witty_service.api.services import ServiceContainer
 from witty_service.application.cve_service import CveService
 
-router = APIRouter(prefix="/api/v1/cve", tags=["cve"], dependencies=[Depends(require_bearer_auth)])
+router = APIRouter(prefix="/cve", tags=["cve"], dependencies=[Depends(require_bearer_auth)])
 
 
 def get_services(request: Request) -> ServiceContainer:
@@ -60,6 +62,30 @@ def update_token(
         )
     cve_service.update_token(token)
     return CveConfigUpdateResponse(ok=True)
+
+
+@router.get("/workbench", response_model=CveWorkbenchResponse)
+def get_workbench(
+    cve_id: str = Query(min_length=1),
+    branches: str = Query(default=""),
+    clone_dir: str = Query(default=""),
+    cve_service: CveService = Depends(get_cve_service),
+) -> CveWorkbenchResponse:
+    workbench = cve_service.get_workbench(
+        cve_id=cve_id,
+        branches=branches,
+        clone_dir=clone_dir,
+    )
+    return CveWorkbenchResponse(**workbench)
+
+
+@router.get("/artifact", response_model=CveArtifactResponse)
+def get_artifact(
+    path: str = Query(min_length=1),
+    cve_service: CveService = Depends(get_cve_service),
+) -> CveArtifactResponse:
+    artifact = cve_service.read_artifact(path)
+    return CveArtifactResponse(**artifact)
 
 
 @router.get("/issues", response_model=CveIssueListResponse)
