@@ -645,6 +645,7 @@ class AgentManager:
         )
         ws_client = await self._prepare_ws_message_client(agent_id, session_id, content)
 
+        terminal_received = False
         try:
             async for event in ws_client.recv():
                 event_dict = dict(event)
@@ -677,23 +678,38 @@ class AgentManager:
                     "sandbox_type": agent.sandbox_type,
                     "event": event_dict,
                 }
-                if event_dict["type"] == "message.completed":
+                if event_dict["type"] in {"message.completed", "turn.completed"}:
+                    terminal_received = True
                     break
         except GeneratorExit:
-            self._logger.info(
-                "User aborted SSE stream: agent_id=%s session_id=%s — sending message.abort via WS",
-                agent_id,
-                session_id,
-            )
-            await self._handle_user_abort(ws_client, agent_id, session_id)
+            if not terminal_received:
+                self._logger.info(
+                    "User aborted SSE stream: agent_id=%s session_id=%s — sending message.abort via WS",
+                    agent_id,
+                    session_id,
+                )
+                await self._handle_user_abort(ws_client, agent_id, session_id)
+            else:
+                self._logger.info(
+                    "User aborted SSE stream after terminal event: agent_id=%s session_id=%s — skip abort",
+                    agent_id,
+                    session_id,
+                )
             raise
         except asyncio.CancelledError:
-            self._logger.info(
-                "SSE stream cancelled: agent_id=%s session_id=%s — sending message.abort via WS",
-                agent_id,
-                session_id,
-            )
-            await self._handle_user_abort(ws_client, agent_id, session_id)
+            if not terminal_received:
+                self._logger.info(
+                    "SSE stream cancelled: agent_id=%s session_id=%s — sending message.abort via WS",
+                    agent_id,
+                    session_id,
+                )
+                await self._handle_user_abort(ws_client, agent_id, session_id)
+            else:
+                self._logger.info(
+                    "SSE stream cancelled after terminal event: agent_id=%s session_id=%s — skip abort",
+                    agent_id,
+                    session_id,
+                )
             raise
         except Exception:
             self._session_manager.upsert_session(
@@ -721,7 +737,6 @@ class AgentManager:
             agent_id,
             session_id,
         )
-        await ws_client.disconnect()    
 
     async def create_session(
         self,
@@ -813,6 +828,23 @@ class AgentManager:
         adaptor_client = self._get_adaptor_http_client(agent_id)
         try:
             await self._session_manager.delete_session_remote(
+                agent_id,
+                session_id,
+                adaptor_client,
+                runtime_agent_id=runtime_agent_id,
+            )
+        finally:
+            await adaptor_client.close()
+
+    async def abort_session(
+        self,
+        agent_id: str,
+        session_id: str,
+        runtime_agent_id: str | None = None,
+    ) -> dict[str, object]:
+        adaptor_client = self._get_adaptor_http_client(agent_id)
+        try:
+            await self._session_manager.abort_session_remote(
                 agent_id,
                 session_id,
                 adaptor_client,
