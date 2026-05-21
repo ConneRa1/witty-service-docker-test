@@ -199,6 +199,28 @@ class SessionManager:
             remote_runtime_agent_id=resolved_runtime_agent_id,
         )
 
+    async def abort_session_remote(
+        self,
+        agent_id: str,
+        session_id: str,
+        adaptor_client: AdaptorHttpClient,
+        runtime_agent_id: str | None = None,
+    ) -> None:
+        """透传到 witty-agent-server 中断 session"""
+        local_session = self._repository.get_session(session_id)
+        resolved_runtime_agent_id = (
+            local_session.remote_runtime_agent_id if local_session is not None else None
+        )
+        if resolved_runtime_agent_id is None:
+            resolved_runtime_agent_id = await self.resolve_runtime_agent_id(
+                adaptor_client=adaptor_client,
+                runtime_agent_id=runtime_agent_id,
+            )
+        await adaptor_client.post(
+                f"/agents/{resolved_runtime_agent_id}/sessions/{session_id}/abort",
+                json={},
+        )
+
     async def delete_session_remote(
         self,
         agent_id: str,

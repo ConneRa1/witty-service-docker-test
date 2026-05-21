@@ -226,6 +226,20 @@ async def delete_session(
 
 
 @router.post(
+    "/{agent_id}/sessions/{session_id}/abort",
+    response_model=None,
+)
+async def abort_session(
+    agent_id: str,
+    session_id: str,
+    runtime_agent_id: str | None = None,
+    services: ServiceContainer = Depends(get_services),
+) -> dict[str, object]:
+    manager = services.get_agent_manager_for_agent(agent_id)
+    return await manager.abort_session(agent_id, session_id, runtime_agent_id=runtime_agent_id)
+
+
+@router.post(
     "/{agent_id}/sessions/{session_id}/messages",
     response_model=MessageEventsResponse,
 )

@@ -85,8 +85,7 @@ class TaskPool:
         if event is not None:
             event.set()
             self._orchestrator.abort_turn(agent_id=agent_id, session_id=session_id)
-            return True
-        return False
+        return event is not None
 
     async def _run_turn(
         self,
