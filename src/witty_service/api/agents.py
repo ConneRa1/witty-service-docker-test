@@ -12,6 +12,7 @@ from witty_service.api.auth import require_bearer_auth
 from witty_service.api.schemas import (
     AgentResponse,
     AgentSkillResponse,
+    AgentWithConversationsResponse,
     ConversationDetailResponse,
     ConversationSummaryResponse,
     CreateAgentRequest,
@@ -67,9 +68,54 @@ def create_agent(
     return _to_agent_response(result.agent, default_session_id=result.default_session.id, process_port=process_port)
 
 
-@router.get("", response_model=list[AgentResponse])
-def list_agents(services: ServiceContainer = Depends(get_services)) -> list[AgentResponse]:
-    """列出 agent，并补充默认会话与 runtime skills 信息。"""
+@router.get("", response_model=list[AgentResponse] | list[AgentWithConversationsResponse])
+def list_agents(
+    include_conversations: bool = False,
+    services: ServiceContainer = Depends(get_services),
+) -> list[AgentResponse] | list[AgentWithConversationsResponse]:
+    """列出 agent，并补充默认会话与 runtime skills 信息。
+
+    当 ``include_conversations=true`` 时，每个agent会附带其conversations摘要
+    """
+    if include_conversations:
+        enriched = services.repository.list_agents_with_conversations()
+        result = []
+        for item in enriched:
+            manager = services.get_agent_manager_for_agent(item["id"])
+            agent = manager._check_and_update_agent_status_if_needed(item["id"])
+
+            process_port: int | None = None
+            if agent.sandbox_type == "local_process" and agent.status != AgentStatus.error:
+                sandbox_state = services.repository.get_sandbox_state(agent.id)
+                if sandbox_state is not None:
+                    process_port = sandbox_state.sandbox_payload_json.get("metadata", {}).get("port")
+
+            sessions = services.session_manager.list_sessions(agent.id)
+            default_session_id = sessions[0].id if sessions else None
+            skills = _safe_list_agent_skills(manager=manager, agent=agent)
+
+            result.append(
+                AgentWithConversationsResponse(
+                    id=agent.id,
+                    name=agent.name,
+                    description=agent.description,
+                    sandbox_type=agent.sandbox_type,
+                    adapter_type=agent.adapter_type,
+                    status=agent.status.value,
+                    sandbox_id=agent.sandbox_id,
+                    workspace_path=agent.workspace_path,
+                    idle_timeout_seconds=agent.idle_timeout_seconds,
+                    has_scheduled_tasks=agent.has_scheduled_tasks,
+                    created_at=agent.created_at,
+                    updated_at=agent.updated_at,
+                    default_session_id=default_session_id,
+                    process_port=process_port,
+                    skills=skills,
+                    conversations=[ConversationSummaryResponse(**c) for c in item["conversations"]],
+                )
+            )
+        return result
+
     agents = services.repository.list_agents()
     result = []
     for agent in agents:
@@ -154,10 +200,12 @@ def list_conversations(
 def get_conversation(
     agent_id: str,
     session_id: str,
+    limit: int = 50,
+    offset: int = 0,
     services: ServiceContainer = Depends(get_services),
 ) -> ConversationDetailResponse:
     session = services.session_manager.get_session(agent_id, session_id)
-    messages = services.repository.get_messages_with_events(session_id)
+    messages = services.repository.get_messages_with_events(session_id, limit=limit, offset=offset)
     return ConversationDetailResponse(
         id=session.id,
         agent_id=session.agent_id,

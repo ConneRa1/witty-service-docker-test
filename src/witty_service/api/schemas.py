@@ -147,6 +147,29 @@ class ConversationSummaryResponse(BaseModel):
     updated_at: datetime
 
 
+class AgentWithConversationsResponse(BaseModel):
+    """Agent with pre-joined conversation summaries (for efficient page-load)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    name: str
+    description: str
+    sandbox_type: str
+    adapter_type: str
+    status: str
+    sandbox_id: str | None
+    workspace_path: str
+    idle_timeout_seconds: int
+    has_scheduled_tasks: bool
+    created_at: datetime
+    updated_at: datetime
+    default_session_id: str | None = None
+    process_port: int | None = None
+    skills: list[dict[str, Any]] = Field(default_factory=list)
+    conversations: list[ConversationSummaryResponse] = Field(default_factory=list)
+
+
 class ConversationDetailResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

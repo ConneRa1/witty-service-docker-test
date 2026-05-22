@@ -305,6 +305,65 @@ class SqliteRepository:
             )
             return [self._to_agent_record(row) for row in rows]
 
+    def list_agents_with_conversations(self) -> list[dict[str, Any]]:
+        """Return all non-deleted agents, each with their conversation summaries.
+
+        Uses a single SQL JOIN to avoid the N+1 problem.  Sessions are ordered
+        by ``updated_at`` descending so the most recently active conversations
+        appear first.
+        """
+        with self._session_factory() as session:
+            rows = (
+                session.query(AgentORM, SessionORM)
+                .outerjoin(SessionORM, SessionORM.agent_id == AgentORM.id)
+                .filter(AgentORM.status != AgentStatus.deleted.value)
+                .order_by(
+                    AgentORM.created_at.asc(),
+                    SessionORM.updated_at.desc(),
+                )
+                .all()
+            )
+
+            agents_map: dict[str, dict[str, Any]] = {}
+            for agent_row, session_row in rows:
+                if agent_row.id not in agents_map:
+                    agents_map[agent_row.id] = {
+                        "id": agent_row.id,
+                        "name": agent_row.name,
+                        "description": agent_row.description,
+                        "sandbox_type": agent_row.sandbox_type,
+                        "adapter_type": agent_row.adapter_type,
+                        "status": agent_row.status,
+                        "sandbox_id": agent_row.sandbox_id,
+                        "workspace_path": agent_row.workspace_path,
+                        "idle_timeout_seconds": agent_row.idle_timeout_seconds,
+                        "has_scheduled_tasks": agent_row.has_scheduled_tasks,
+                        "created_at": agent_row.created_at,
+                        "updated_at": agent_row.updated_at,
+                        "conversations": [],
+                    }
+                if session_row is not None:
+                    msg_count = (
+                        session.query(func.count(MessageORM.id))
+                        .filter(MessageORM.session_id == session_row.id)
+                        .scalar()
+                    ) or 0
+                    # # Skip auto-created default sessions that have no messages yet
+                    # if msg_count == 0:
+                    #     continue
+                    agents_map[agent_row.id]["conversations"].append({
+                        "id": session_row.id,
+                        "agent_id": session_row.agent_id,
+                        "title": session_row.title,
+                        "pinned": session_row.pinned,
+                        "status": session_row.status.value if isinstance(session_row.status, SessionStatus) else str(session_row.status),
+                        "message_count": msg_count,
+                        "created_at": session_row.created_at,
+                        "updated_at": session_row.updated_at,
+                    })
+
+            return list(agents_map.values())
+
     def update_agent_status(
         self,
         agent_id: str,
@@ -606,12 +665,6 @@ class SqliteRepository:
                     .filter(MessageORM.session_id == row.id)
                     .scalar()
                 ) or 0
-                first_msg = (
-                    session.query(MessageORM)
-                    .filter(MessageORM.session_id == row.id, MessageORM.role == "user")
-                    .order_by(MessageORM.created_at.asc())
-                    .first()
-                )
                 result.append({
                     "id": row.id,
                     "agent_id": row.agent_id,
@@ -619,33 +672,37 @@ class SqliteRepository:
                     "pinned": row.pinned,
                     "status": row.status.value if isinstance(row.status, SessionStatus) else row.status,
                     "message_count": msg_count,
-                    "first_message_preview": first_msg.content[:100] if first_msg else None,
                     "created_at": row.created_at,
                     "updated_at": row.updated_at,
                 })
             return result
 
-    def get_messages_with_events(self, session_id: str) -> list[dict[str, Any]]:
+    def get_messages_with_events(self, session_id: str, limit: int = 20, offset: int = 0) -> list[dict[str, Any]]:
         with self._session_factory() as session:
             messages = (
                 session.query(MessageORM)
                 .filter(MessageORM.session_id == session_id)
                 .order_by(MessageORM.created_at.asc())
+                .offset(offset)
+                .limit(limit)
                 .all()
             )
+            if not messages:
+                return []
+
+            message_ids = [m.id for m in messages]
             all_events = (
                 session.query(MessageEventORM)
-                .filter(MessageEventORM.session_id == session_id)
+                .filter(MessageEventORM.message_id.in_(message_ids))
                 .order_by(MessageEventORM.seq_no.asc())
                 .all()
             )
-            events_by_message: dict[str | None, list[MessageEventORM]] = {}
+            events_by_message: dict[str, list[MessageEventORM]] = {}
             for evt in all_events:
                 key = evt.message_id
                 if key not in events_by_message:
                     events_by_message[key] = []
                 events_by_message[key].append(evt)
-            orphan_events = events_by_message.pop(None, [])
 
             result = []
             for msg in messages:
