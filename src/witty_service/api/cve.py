@@ -79,6 +79,22 @@ def get_workbench(
     return CveWorkbenchResponse(**workbench)
 
 
+@router.get("/pr-readiness")
+def get_pr_readiness(
+    cve_id: str = Query(min_length=1),
+    branches: str = Query(default=""),
+    clone_dir: str = Query(default=""),
+    issue_number: str = Query(default=""),
+    cve_service: CveService = Depends(get_cve_service),
+) -> dict:
+    return cve_service.get_pr_readiness(
+        cve_id=cve_id,
+        branches=branches,
+        clone_dir=clone_dir,
+        issue_number=issue_number,
+    )
+
+
 @router.get("/artifact", response_model=CveArtifactResponse)
 def get_artifact(
     path: str = Query(min_length=1),
