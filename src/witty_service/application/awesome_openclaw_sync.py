@@ -17,7 +17,7 @@ from witty_service.persistence.repositories import (
 AWESOME_REPO_URL = "https://github.com/VoltAgent/awesome-openclaw-skills"
 AWESOME_REPO_NAME = "awesome-openclaw-skills"
 AWESOME_REPO_BRANCH = "main"
-AWESOME_SOURCE_TYPE = "git"
+AWESOME_SOURCE_TYPE = "clawhub"
 AWESOME_CATEGORIES_DIR = "categories"
 AWESOME_DISCOVER_STATUS_DONE = "done"
 AWESOME_DISCOVER_STATUS_DISCOVERING = "discovering"
