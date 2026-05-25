@@ -402,6 +402,7 @@ async def uninstall_agent_skill(
     await agent_manager.uninstall_agent_skill(
         agent_id=agent_id,
         skill_name=installed_record.skill_name,
+        source_type=installed_record.source_type,
     )
 
     try:

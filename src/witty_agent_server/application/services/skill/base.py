@@ -36,5 +36,6 @@ class AgentSkillServiceBase(ABC):
         *,
         agent_id: str | None = None,
         skill_name: str,
+        source_type: str | None = None,
     ) -> dict[str, Any]:
-        """卸载当前 runtime 中的技能。"""
+        """卸载当前 runtime 中的技能。source_type 为 'local' 时走本地删除逻辑。"""

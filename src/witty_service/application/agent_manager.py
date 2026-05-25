@@ -318,7 +318,7 @@ class AgentManager:
             return {"status": "accepted"}
         return payload
 
-    async def uninstall_agent_skill(self, agent_id: str, skill_name: str) -> dict[str, Any]:
+    async def uninstall_agent_skill(self, agent_id: str, skill_name: str, source_type: str | None = None) -> dict[str, Any]:
         """从 runtime 卸载 skill。"""
         agent = self._get_agent(agent_id)
 
@@ -334,9 +334,12 @@ class AgentManager:
         adaptor_client = self._get_adaptor_http_client(agent_id)
         try:
             try:
+                request_body: dict[str, Any] = {"skill_name": skill_name}
+                if source_type:
+                    request_body["source_type"] = source_type
                 payload = await adaptor_client.post(
                     "/agent/skills/uninstall",
-                    json={"skill_name": skill_name},
+                    json=request_body,
                 )
             except httpx.HTTPError as exc:
                 raise DomainError(

@@ -219,12 +219,17 @@ class OpenClawSkillService(AgentSkillServiceBase):
         *,
         agent_id: str | None = None,
         skill_name: str,
+        source_type: str | None = None,
     ) -> dict[str, Any]:
         del agent_id
         normalized_name = self._normalize_skill_name(
             skill_name=skill_name,
             error_cls=OpenClawSkillsUninstallError,
         )
+
+        if source_type == "local":
+            return self._uninstall_local_skill(normalized_name)
+
         command = ["clawhub", "uninstall", normalized_name, "--yes"]
         try:
             subprocess.run(command, check=True, capture_output=True, text=True)
@@ -255,6 +260,25 @@ class OpenClawSkillService(AgentSkillServiceBase):
             "skill_name": normalized_name,
             "uninstalled": True,
             "uninstall_channel": "clawhub_cmd",
+        }
+
+    def _uninstall_local_skill(self, skill_name: str) -> dict[str, Any]:
+        dst = self.skills_dir / skill_name
+
+        if dst.exists():
+            shutil.rmtree(dst)
+
+        logger.info(
+            "uninstall_local_skill success, runtime_type=%s skill_name=%s dst=%s",
+            self.runtime_type,
+            skill_name,
+            dst,
+        )
+        return {
+            "runtime_type": self.runtime_type,
+            "skill_name": skill_name,
+            "uninstalled": True,
+            "uninstall_channel": "local_remove",
         }
 
     def _normalize_skill_name(
