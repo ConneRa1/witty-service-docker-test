@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -251,6 +252,76 @@ class CveService:
             branches_response.append({"name": branch_name, "status": status, "artifacts": artifacts})
 
         return {"cve_id": cve_id.strip(), "cache_key": cache_key, "branches": branches_response}
+
+    def get_pr_readiness(
+        self,
+        cve_id: str,
+        branches: str,
+        clone_dir: str = "",
+        issue_number: str = "",
+    ) -> dict[str, Any]:
+        config = self.get_config()
+        repo_dir = Path(clone_dir.strip() or config.get("clone_dir", "")).expanduser() / "kernel"
+        branch_list = [item.strip() for item in branches.split(",") if item.strip()]
+        fix_branch_suffixes = [
+            item
+            for item in [
+                issue_number.strip(),
+                cve_id.strip(),
+                cve_id.strip().rsplit("-", 1)[-1],
+            ]
+            if item
+        ]
+
+        branches_response: list[dict[str, Any]] = []
+        for branch_name in branch_list:
+            fix_branch = (
+                f"fix-{branch_name}-{fix_branch_suffixes[0]}"
+                if fix_branch_suffixes
+                else f"fix-{branch_name}"
+            )
+            ready = False
+            reason = "fix_branch_missing"
+
+            if not repo_dir.exists():
+                reason = "clone_dir_missing"
+            elif not (repo_dir / ".git").exists():
+                reason = "not_git_repo"
+            else:
+                result = subprocess.run(
+                    ["git", "-C", str(repo_dir), "branch", "-v"],
+                    check=False,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                )
+                local_branches = {
+                    line.strip().lstrip("*").strip().split(maxsplit=1)[0]
+                    for line in result.stdout.splitlines()
+                    if line.strip()
+                }
+                for suffix in fix_branch_suffixes:
+                    candidate = f"fix-{branch_name}-{suffix}"
+                    if candidate in local_branches:
+                        ready = True
+                        fix_branch = candidate
+                        break
+                reason = "local_fix_branch_exists" if ready else "fix_branch_missing"
+
+            branches_response.append(
+                {
+                    "branch": branch_name,
+                    "fix_branch": fix_branch,
+                    "ready": ready,
+                    "reason": reason,
+                }
+            )
+
+        return {
+            "cve_id": cve_id.strip(),
+            "ready": any(item["ready"] for item in branches_response),
+            "branches": branches_response,
+        }
 
     def read_artifact(self, raw_path: str) -> dict[str, str]:
         artifact_path = Path(raw_path).expanduser().resolve()
