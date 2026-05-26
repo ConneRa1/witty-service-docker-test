@@ -1,9 +1,21 @@
 from __future__ import annotations
 
-from datetime import datetime
-from typing import Any
+from datetime import datetime, timezone
+from typing import Annotated, Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, PlainSerializer
+
+
+def _format_utc_datetime(dt: datetime) -> str:
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.isoformat().replace("+00:00", "Z")
+
+
+UtcDatetime = Annotated[
+    datetime,
+    PlainSerializer(_format_utc_datetime, return_type=str),
+]
 
 
 class CreateAgentRequest(BaseModel):
@@ -35,7 +47,7 @@ class AgentSkillResponse(BaseModel):
     source_type: str
     repo_id: str | None
     skill_name: str
-    installed_at: datetime
+    installed_at: UtcDatetime
     relative_path: str | None = None
     metadata: dict[str, Any] | None = None
     skill_source: str | None = None
@@ -55,8 +67,8 @@ class AgentResponse(BaseModel):
     workspace_path: str
     idle_timeout_seconds: int
     has_scheduled_tasks: bool
-    created_at: datetime
-    updated_at: datetime
+    created_at: UtcDatetime
+    updated_at: UtcDatetime
     default_session_id: str | None = None
     process_port: int | None = None
     skills: list[dict[str, Any]] = Field(default_factory=list)
@@ -72,8 +84,8 @@ class SessionResponse(BaseModel):
     runtime_type: str | None = None
     title: str | None = None
     pinned: bool = False
-    created_at: datetime
-    updated_at: datetime
+    created_at: UtcDatetime
+    updated_at: UtcDatetime
 
 
 class MessageEventsResponse(BaseModel):
@@ -105,8 +117,8 @@ class ModelResponse(BaseModel):
     max_tokens: int
     temperature: float
     is_default: bool
-    created_at: datetime
-    updated_at: datetime
+    created_at: UtcDatetime
+    updated_at: UtcDatetime
 
 
 class SessionEventItem(BaseModel):
@@ -115,7 +127,7 @@ class SessionEventItem(BaseModel):
     type: str
     source: str | None = None
     payload: dict[str, Any]
-    timestamp: datetime
+    timestamp: UtcDatetime
 
 
 class PaginationInfo(BaseModel):
@@ -143,30 +155,11 @@ class ConversationSummaryResponse(BaseModel):
     status: str
     message_count: int = 0
     first_message_preview: str | None = None
-    created_at: datetime
-    updated_at: datetime
+    created_at: UtcDatetime
+    updated_at: UtcDatetime
 
 
-class AgentWithConversationsResponse(BaseModel):
-    """Agent with pre-joined conversation summaries (for efficient page-load)."""
-
-    model_config = ConfigDict(from_attributes=True)
-
-    id: str
-    name: str
-    description: str
-    sandbox_type: str
-    adapter_type: str
-    status: str
-    sandbox_id: str | None
-    workspace_path: str
-    idle_timeout_seconds: int
-    has_scheduled_tasks: bool
-    created_at: datetime
-    updated_at: datetime
-    default_session_id: str | None = None
-    process_port: int | None = None
-    skills: list[dict[str, Any]] = Field(default_factory=list)
+class AgentWithConversationsResponse(AgentResponse):
     conversations: list[ConversationSummaryResponse] = Field(default_factory=list)
 
 
@@ -179,8 +172,9 @@ class ConversationDetailResponse(BaseModel):
     pinned: bool = False
     status: str
     messages: list[dict[str, Any]] = Field(default_factory=list)
-    created_at: datetime
-    updated_at: datetime
+    has_more: bool = False
+    created_at: UtcDatetime
+    updated_at: UtcDatetime
 
 
 class UpdateConversationRequest(BaseModel):

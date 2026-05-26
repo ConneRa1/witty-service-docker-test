@@ -94,23 +94,15 @@ def list_agents(
             default_session_id = sessions[0].id if sessions else None
             skills = _safe_list_agent_skills(manager=manager, agent=agent)
 
+            base = _to_agent_response(
+                agent,
+                default_session_id=default_session_id,
+                process_port=process_port,
+                skills=skills,
+            )
             result.append(
                 AgentWithConversationsResponse(
-                    id=agent.id,
-                    name=agent.name,
-                    description=agent.description,
-                    sandbox_type=agent.sandbox_type,
-                    adapter_type=agent.adapter_type,
-                    status=agent.status.value,
-                    sandbox_id=agent.sandbox_id,
-                    workspace_path=agent.workspace_path,
-                    idle_timeout_seconds=agent.idle_timeout_seconds,
-                    has_scheduled_tasks=agent.has_scheduled_tasks,
-                    created_at=agent.created_at,
-                    updated_at=agent.updated_at,
-                    default_session_id=default_session_id,
-                    process_port=process_port,
-                    skills=skills,
+                    **base.model_dump(),
                     conversations=[ConversationSummaryResponse(**c) for c in item["conversations"]],
                 )
             )
@@ -201,11 +193,13 @@ def get_conversation(
     agent_id: str,
     session_id: str,
     limit: int = 50,
-    offset: int = 0,
+    before: str | None = None,
     services: ServiceContainer = Depends(get_services),
 ) -> ConversationDetailResponse:
     session = services.session_manager.get_session(agent_id, session_id)
-    messages = services.repository.get_messages_with_events(session_id, limit=limit, offset=offset)
+    messages, has_more = services.repository.get_messages_with_events(
+        session_id, limit=limit, before=before
+    )
     return ConversationDetailResponse(
         id=session.id,
         agent_id=session.agent_id,
@@ -213,6 +207,7 @@ def get_conversation(
         pinned=session.pinned,
         status=session.status,
         messages=messages,
+        has_more=has_more,
         created_at=session.created_at,
         updated_at=session.updated_at,
     )
@@ -378,26 +373,25 @@ async def send_message_stream(
         session_id=session_id,
         content=payload.content,
     )
-    first_event = await _prefetch_first_event(event_stream)
+    return await _build_sse_streaming_response(event_stream)
 
-    async def stream() -> AsyncIterator[str]:
-        try:
-            if first_event is None:
-                return
-    
-            yield _format_sse_data(first_event)
-            if first_event["event"]["type"] in {"message.completed", "turn.completed"}:
-                return
 
-            async for event in event_stream:
-                yield _format_sse_data(event)
+@router.post(
+    "/{agent_id}/sessions/{session_id}/messages/stream/reconnect",
+    response_class=StreamingResponse,
+)
+async def reconnect_message_stream(
+    agent_id: str,
+    session_id: str,
+    services: ServiceContainer = Depends(get_services),
+) -> StreamingResponse:
+    manager = services.get_agent_manager_for_agent(agent_id)
+    event_stream = manager.reconnect_stream(
+        agent_id=agent_id,
+        session_id=session_id,
+    )
+    return await _build_sse_streaming_response(event_stream)
 
-        except (GeneratorExit, asyncio.CancelledError): 
-            if hasattr(event_stream, "aclose"): 
-                await event_stream.aclose() 
-            raise
-
-    return StreamingResponse(stream(), media_type="text/event-stream")
 
 
 @router.post("/{agent_id}/skills/", response_model=AgentSkillResponse, status_code=status.HTTP_202_ACCEPTED)
@@ -585,6 +579,29 @@ def _safe_list_agent_skills(manager: Any, agent: AgentRecord) -> list[dict[str, 
     except Exception:
         logger.warning("Failed to fetch agent skills, fallback to empty list: agent_id=%s", agent.id, exc_info=True)
         return []
+
+
+async def _build_sse_streaming_response(event_stream: AsyncIterator[dict[str, Any]]) -> StreamingResponse:
+    first_event = await _prefetch_first_event(event_stream)
+
+    async def stream() -> AsyncIterator[str]:
+        try:
+            if first_event is None:
+                return
+
+            yield _format_sse_data(first_event)
+            if first_event["event"]["type"] in {"message.completed", "turn.completed"}:
+                return
+
+            async for event in event_stream:
+                yield _format_sse_data(event)
+
+        except (GeneratorExit, asyncio.CancelledError):
+            if hasattr(event_stream, "aclose"):
+                await event_stream.aclose()
+            raise
+
+    return StreamingResponse(stream(), media_type="text/event-stream")
 
 
 def _format_sse_data(event: dict[str, Any]) -> str:
