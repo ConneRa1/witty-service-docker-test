@@ -127,6 +127,7 @@ curl -s http://127.0.0.1:8000/healthz
 | `/agents/{agent_id}/sessions/{session_id}/messages/stream` | `POST` | 发送消息并以 SSE 流返回 |
 | `/models` | `POST` | 添加大模型配置 |
 | `/models` | `GET` | 获取大模型列表 |
+| `/models/{model_id}`| `PUT`    | 更新大模型配置        |
 | `/models/{model_id}` | `DELETE` | 删除大模型配置 |
 | `/agents/{agent_id}/sessions/{session_id}/events` | `GET` | 查询会话事件回放 |
 | `/agents/{agent_id}/sessions/{session_id}/abort` | `POST` | 中止会话：中止正在运行的会话 |
@@ -137,31 +138,7 @@ curl -s http://127.0.0.1:8000/healthz
 | `/agents/{agent_id}/skills/installed` | `GET` | 查询已安装技能：查询本地数据库，返回 agent 已安装的技能列表 |
 
 说明：
-=======
-| 接口                                                                | 方法       | 描述             |
-| ----------------------------------------------------------------- | -------- | -------------- |
-| `/healthz`                                                        | `GET`    | 服务存活检查         |
-| `/agents`                                                  | `POST`   | 创建 Agent       |
-| `/agents`                                                  | `GET`    | 列出所有 Agent     |
-| `/agents/{agent_id}`                                       | `GET`    | 获取 Agent 详情    |
-| `/agents/{agent_id}`                                       | `DELETE` | 删除 Agent       |
-| `/agents/{agent_id}/pause`                                 | `POST`   | 暂停 Agent       |
-| `/agents/{agent_id}/resume`                                | `POST`   | 恢复 Agent       |
-| `/agents/{agent_id}/sessions`                              | `GET`    | 列出所有会话         |
-| `/agents/{agent_id}/sessions`                              | `POST`   | 创建会话           |
-| `/agents/{agent_id}/sessions/{session_id}`                 | `GET`    | 获取会话详情         |
-| `/agents/{agent_id}/sessions/{session_id}`                 | `DELETE` | 删除会话           |
-| `/agents/{agent_id}/sessions/{session_id}/messages`        | `POST`   | 发送消息           |
-| `/agents/{agent_id}/sessions/{session_id}/messages/stream` | `POST`   | 发送消息并以 SSE 流返回 |
-| `/models`                                                  | `POST`   | 添加大模型配置        |
-| `/models`                                                  | `GET`    | 获取大模型列表        |
-| `/models/{model_id}`                                       | `PUT`    | 更新大模型配置        |
-| `/models/{model_id}`                                       | `DELETE` | 删除大模型配置        |
-| `/agents/{agent_id}/sessions/{session_id}/events`          | `GET`    | 查询会话事件回放       |
 
-说明：
-
->>>>>>> Stashed changes
 - `GET /agents/{agent_id}/sessions`
 - `POST /agents/{agent_id}/sessions`
 - `GET /agents/{agent_id}/sessions/{session_id}`
