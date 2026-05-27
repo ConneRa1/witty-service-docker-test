@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -24,6 +25,29 @@ logger = logging.getLogger(__name__)
 class OpenClawSkillService(AgentSkillServiceBase):
     runtime_type = "openclaw"
     skills_dir = Path.home() / ".openclaw" / "skills"
+
+    _ALLOWED_DELETE_BASES: list[Path] = [
+        skills_dir,
+        Path.home() / ".agent" / "skills",
+        Path.home() / ".openclaw" / "workspace/skills",
+        Path.home() / ".openclaw" / "workspace/.agents/skills",
+        Path.home() / ".openclaw" / "plugin-skills",
+    ]
+
+    @classmethod
+    def _validate_path_under_allowed_bases(cls, target: Path) -> Path:
+        resolved = target.expanduser().resolve()
+        for base in cls._ALLOWED_DELETE_BASES:
+            base_resolved = base.resolve()
+            try:
+                resolved.relative_to(base_resolved)
+                return resolved
+            except ValueError:
+                continue
+        raise ValueError(
+            f"Path {resolved} is outside allowed directories: "
+            f"{[str(b) for b in cls._ALLOWED_DELETE_BASES]}"
+        )
 
     def list_skills(self, *, agent_id: str | None = None) -> dict[str, Any]:
         """查询并返回当前 agent 可用的技能摘要列表。"""
@@ -272,6 +296,14 @@ class OpenClawSkillService(AgentSkillServiceBase):
 
     def _uninstall_local_skill(self, skill_name: str) -> dict[str, Any]:
         dst = self.skills_dir / skill_name
+        try:
+            dst = self._validate_path_under_allowed_bases(dst)
+        except ValueError as exc:
+            raise OpenClawSkillsUninstallError(
+                runtime_type=self.runtime_type,
+                skill_name=skill_name,
+                reason=str(exc),
+            ) from exc
         if dst.exists():
             shutil.rmtree(dst)
 
@@ -289,7 +321,14 @@ class OpenClawSkillService(AgentSkillServiceBase):
         }
 
     def _uninstall_builtin_skill(self, skill_name: str, source_path: str) -> dict[str, Any]:
-        dst = Path(source_path).expanduser().resolve()
+        try:
+            dst = self._validate_path_under_allowed_bases(Path(source_path))
+        except ValueError as exc:
+            raise OpenClawSkillsUninstallError(
+                runtime_type=self.runtime_type,
+                skill_name=skill_name,
+                reason=str(exc),
+            ) from exc
         if dst.exists():
             shutil.rmtree(dst)
 
