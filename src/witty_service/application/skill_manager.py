@@ -17,6 +17,7 @@ from witty_service.api.schemas import SkillRepositoryRequest, SkillSourceType
 from witty_service.application.awesome_openclaw_sync import (
     is_awesome_openclaw_repository,
     sync_awesome_openclaw_skills,
+    AWESOME_REPO_URL
 )
 from witty_service.persistence.repositories import SkillRepositoryRecord, SkillRecord, SqliteRepository
 
@@ -338,6 +339,13 @@ class SkillManager:
             sync_awesome_openclaw_skills(repository=repository, repo_id=None)
         except Exception as exc:
             _logger.warning("Background awesome-openclaw-skills sync failed: %s", exc)
+            awesome_repo = repository.get_skill_repository_by_name(AWESOME_REPO_URL)
+            if awesome_repo is not None:
+                repository.update_skill_repository(
+                    awesome_repo.repo_id,
+                    skill_discover_status=SkillDiscoverStatus.FAILED,
+                    skill_num=0,
+                )
 
     def _set_discovery_status(self, repo: SkillRepositoryRecord, status: str) -> None:
         self.repository.update_skill_repository(

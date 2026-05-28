@@ -21,6 +21,7 @@ AWESOME_SOURCE_TYPE = "clawhub"
 AWESOME_CATEGORIES_DIR = "categories"
 AWESOME_DISCOVER_STATUS_DONE = "done"
 AWESOME_DISCOVER_STATUS_DISCOVERING = "discovering"
+_CLONE_TIMEOUT_SECONDS = 120
 
 _SKILL_LINE_PATTERN = re.compile(
     r"^\s*-\s*\[([^\]]+)\]\((https?://[^)]+)\)\s*-\s*(.+?)\s*$"
@@ -39,8 +40,7 @@ def is_awesome_openclaw_repository(repository: SkillRepositoryRecord) -> bool:
     normalized_url = _normalize_repo_url(repository.url)
     if normalized_url == AWESOME_REPO_URL:
         return True
-    return repository.repo_name == AWESOME_REPO_NAME
-
+    return False
 
 def sync_awesome_openclaw_skills(
     *,
@@ -48,6 +48,9 @@ def sync_awesome_openclaw_skills(
     repo_id: str | None = None,
 ) -> SkillRepositoryRecord:
     target_repo = _resolve_or_create_repository(repository=repository, repo_id=repo_id)
+    if target_repo.skill_discover_status == AWESOME_DISCOVER_STATUS_DONE and repo_id is None:
+        return target_repo
+
     repository.update_skill_repository(
         target_repo.repo_id,
         source_type=AWESOME_SOURCE_TYPE,
@@ -80,7 +83,7 @@ def _resolve_or_create_repository(
             raise KeyError(f"Skill repository not found: {repo_id}")
         if not is_awesome_openclaw_repository(existing):
             raise ValueError(
-                f"Repository {repo_id} is not {AWESOME_REPO_NAME}: "
+                f"Repository {repo_id} is not {AWESOME_REPO_URL}: "
                 f"name={existing.repo_name} url={existing.url}"
             )
         return existing
@@ -124,6 +127,7 @@ def _clone_repo(target_dir: Path) -> Path:
         check=True,
         capture_output=True,
         text=True,
+        timeout=_CLONE_TIMEOUT_SECONDS,
     )
     return checkout_dir
 
