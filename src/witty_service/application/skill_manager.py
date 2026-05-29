@@ -5,13 +5,15 @@ import logging
 import os
 import re
 import shutil
+import stat
 import subprocess
+from io import BytesIO
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 from uuid import NAMESPACE_URL, uuid5
-from zipfile import ZipFile
+from zipfile import BadZipFile, ZipFile
 
 from witty_service.api.schemas import SkillRepositoryRequest, SkillSourceType
 from witty_service.application.awesome_openclaw_sync import (
@@ -23,6 +25,9 @@ from witty_service.persistence.repositories import SkillRepositoryRecord, SkillR
 
 _logger = logging.getLogger(__name__)
 GIT_CLONE_RETRY_TIMES = 3
+ZIP_MAX_ARCHIVE_SIZE = 50 * 1024 * 1024 # 上传包大小限制
+ZIP_MAX_EXTRACTED_SIZE = 100 * 1024 * 1024 # 解压后总大小限制
+ZIP_MAX_ENTRY_COUNT = 1000  # 文件个数限制
 
 
 class SkillDiscoverStatus:
@@ -147,10 +152,23 @@ class SkillManager:
         if existing_repo is not None:
             raise ValueError(
                 f'Skill repository "{repository_name}" already exists with repo_id "{existing_repo.repo_id}"'
-            )        
+            )
+
+        content = file.file.read()
+        if len(content) > ZIP_MAX_ARCHIVE_SIZE:
+            raise ValueError(
+                f'Archive size {len(content)} bytes exceeds limit {ZIP_MAX_ARCHIVE_SIZE} bytes'
+            )
+
+        precheck_extract_dir = self._skill_archives_dir / f'precheck-{Path(repository_name).stem}'
+        try:
+            with ZipFile(BytesIO(content)) as archive:
+                self._validate_zip_entries(archive, precheck_extract_dir)
+        except BadZipFile as exc:
+            raise ValueError('Invalid ZIP file') from exc
 
         archive_path = self._skill_archives_dir / repository_name
-        archive_path.write_bytes(file.file.read())
+        archive_path.write_bytes(content)
 
         return self.repository.create_skill_repository(
             name=repository_name,
@@ -503,11 +521,9 @@ class SkillManager:
         self, repo: SkillRepositoryRecord
     ) -> list[SkillRecord]:
         local_path = Path(str(repo.local_path)).expanduser().resolve(strict=False)
-        if local_path.is_file() and local_path.suffix == '.zip':
-            extract_dir = self._prepare_archive_extract_dir(repo)
-            repo_root = self._extract_local_archive_to_dir(local_path, extract_dir)
-            return self._scan_local_skill_repository_root(repo, repo_root)
-        return self._scan_local_skill_repository_root(repo, local_path)
+        extract_dir = self._prepare_archive_extract_dir(repo)
+        repo_root = self._extract_local_archive_to_dir(local_path, extract_dir)
+        return self._scan_local_skill_repository_root(repo, repo_root)
 
     def _resolve_extract_dir(self, repo: SkillRepositoryRecord) -> Path:
         local_path = Path(str(repo.local_path)).expanduser().resolve(strict=False)
@@ -524,13 +540,35 @@ class SkillManager:
     @staticmethod
     def _validate_zip_entries(archive: ZipFile, extract_dir: Path) -> None:
         extract_dir_resolved = extract_dir.resolve()
-        for member in archive.namelist():
-            member_path = (extract_dir_resolved / member).resolve()
+        members = archive.infolist()
+        if len(members) > ZIP_MAX_ENTRY_COUNT:
+            raise ValueError(
+                f'ZIP contains {len(members)} entries, exceeds limit {ZIP_MAX_ENTRY_COUNT}'
+            )
+        total_size = 0
+        for member in members:
+            total_size += member.file_size
+            if total_size > ZIP_MAX_EXTRACTED_SIZE:
+                raise ValueError(
+                    f'ZIP extracted size {total_size} bytes exceeds limit {ZIP_MAX_EXTRACTED_SIZE} bytes'
+                )
+            if stat.S_IFMT(member.external_attr >> 16) == stat.S_IFLNK:
+                # external_attr 检测 S_IFLNK ，拒绝符号链接
+                raise ValueError(
+                    f"ZIP entry '{member.filename}' is a symbolic link, which is not allowed"
+                )
+            parts = member.filename.split(os.path.sep)
+            # 检查 ’..‘，与 resolve().relative_to() 互补， 双重防护，防止路径穿越
+            if '..' in parts:
+                raise ValueError(
+                    f"ZIP entry '{member.filename}' contains path traversal sequence"
+                )
+            member_path = (extract_dir_resolved / member.filename).resolve()
             try:
                 member_path.relative_to(extract_dir_resolved)
             except ValueError:
                 raise ValueError(
-                    f"ZIP entry '{member}' resolves to path outside target directory"
+                    f"ZIP entry '{member.filename}' resolves to path outside target directory"
                 )
 
     def _extract_local_archive_to_dir(

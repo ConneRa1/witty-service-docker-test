@@ -148,8 +148,12 @@ class OpenClawSkillService(AgentSkillServiceBase):
         if source_path:
             return self._install_local_skill(normalized_name, source_path)
         try:
-            self._install_skill_via_clawhub(normalized_name)
             install_channel = "clawhub_cmd"
+            self._install_skill_via_clawhub(normalized_name)
+            self._openclaw_client.enable_skill(
+                agent_id=agent_id,
+                skill_name=normalized_name,
+            )
         except OpenClawSkillsInstallError as cmd_exc:
             logger.warning(
                 (
@@ -163,13 +167,13 @@ class OpenClawSkillService(AgentSkillServiceBase):
                 cmd_exc.details.get("reason"),
             )
             try:
+                install_channel = "gateway_rpc"
                 self._openclaw_client.install_skill(
                     agent_id=agent_id,
                     skill_name=normalized_name,
                     version=None,
-                    force=None,
+                    force=True,
                 )
-                install_channel = "gateway_rpc"
             except OpenClawGatewayClientError as rpc_exc:
                 raise OpenClawSkillsInstallError(
                     runtime_type=self.runtime_type,
@@ -282,7 +286,6 @@ class OpenClawSkillService(AgentSkillServiceBase):
         source_type: str | None = None,
         source_path: str | None = None,
     ) -> dict[str, Any]:
-        del agent_id
         normalized_name = self._normalize_skill_name(
             skill_name=skill_name,
             error_cls=OpenClawSkillsUninstallError,
@@ -294,17 +297,56 @@ class OpenClawSkillService(AgentSkillServiceBase):
         if source_type == "builtin" and source_path:
             return self._uninstall_builtin_skill(normalized_name, source_path)
 
-        command = ["clawhub", "uninstall", normalized_name, "--yes"]
+        try:
+            uninstall_channel = "clawhub_cmd"
+            self._uninstall_skill_via_clawhub(normalized_name)
+        except OpenClawSkillsUninstallError as cmd_exc:
+            logger.warning(
+                (
+                    "uninstall_skill clawhub command failed, fallback to gateway rpc, "
+                    "runtime_type=%s skill_name=%s reason=%s"
+                ),
+                self.runtime_type,
+                normalized_name,
+                cmd_exc.details.get("reason"),
+            )
+            try:
+                uninstall_channel = "gateway_rpc"
+                self._openclaw_client.uninstall_skill(
+                    agent_id=agent_id,
+                    skill_name=normalized_name,
+                )
+            except OpenClawGatewayClientError as rpc_exc:
+                raise OpenClawSkillsUninstallError(
+                    runtime_type=self.runtime_type,
+                    skill_name=normalized_name,
+                    reason=(
+                        "clawhub uninstall failed "
+                        f"({cmd_exc.details.get('reason')}); "
+                        "gateway rpc fallback failed "
+                        f"({rpc_exc.code}: {rpc_exc.message})"
+                    ),
+                ) from rpc_exc
+
+        return {
+            "runtime_type": self.runtime_type,
+            "skill_name": normalized_name,
+            "uninstalled": True,
+            "uninstall_channel": uninstall_channel,
+        }
+
+    def _uninstall_skill_via_clawhub(self, skill_name: str) -> None:
+        command = ["clawhub", "uninstall", skill_name, "--yes"]
         try:
             result = subprocess.run(command, check=True, capture_output=True, text=True)
             logger.info(
                 "clawhub uninstall success, skill_name=%s command=%s stdout=%s stderr=%s",
-                normalized_name, command, result.stdout.strip(), result.stderr.strip(),
+                skill_name, command, result.stdout.strip(), result.stderr.strip(),
             )
         except FileNotFoundError as exc:
             raise OpenClawSkillsUninstallError(
                 runtime_type=self.runtime_type,
-                skill_name=normalized_name,
+                skill_name=skill_name,
                 reason="clawhub command not found",
             ) from exc
         except subprocess.CalledProcessError as exc:
@@ -313,22 +355,15 @@ class OpenClawSkillService(AgentSkillServiceBase):
             reason = stderr or stdout or f"clawhub exited with code {exc.returncode}"
             raise OpenClawSkillsUninstallError(
                 runtime_type=self.runtime_type,
-                skill_name=normalized_name,
+                skill_name=skill_name,
                 reason=reason,
             ) from exc
-        except Exception as exc:  # pragma: no cover - fs/environment specific
+        except Exception as exc:
             raise OpenClawSkillsUninstallError(
                 runtime_type=self.runtime_type,
-                skill_name=normalized_name,
+                skill_name=skill_name,
                 reason=str(exc),
             ) from exc
-
-        return {
-            "runtime_type": self.runtime_type,
-            "skill_name": normalized_name,
-            "uninstalled": True,
-            "uninstall_channel": "clawhub_cmd",
-        }
 
     def _uninstall_local_skill(self, skill_name: str) -> dict[str, Any]:
         dst = self.skills_dir / skill_name

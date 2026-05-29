@@ -231,6 +231,74 @@ class OpenClawGatewayClient(ClientBase):
             skill_name,
             sorted(payload.keys()),
         )
+
+        self.enable_skill(skill_name=skill_name, agent_id=agent_id)
+
+        return payload
+
+    def enable_skill(self, *, skill_name: str, agent_id: str | None = None) -> None:
+        try:
+            with self._open_connection() as ws:
+                self._rpc(
+                    ws,
+                    method="skills.update",
+                    params={
+                        "skillKey": skill_name,
+                        "enabled": True,
+                    },
+                )
+            logger.info(
+                "enable_skill success by gateway rpc, agent_id=%s skillKey=%s",
+                agent_id,
+                skill_name,
+            )
+        except OpenClawGatewayClientError as exc:
+            logger.warning(
+                "enable_skill failed by gateway rpc, agent_id=%s skillKey=%s code=%s message=%s",
+                agent_id,
+                skill_name,
+                exc.code,
+                exc.message,
+            )
+
+    def uninstall_skill(
+        self,
+        *,
+        skill_name: str,
+        agent_id: str | None = None,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {
+            "skillKey": skill_name,
+            "enabled": False,
+        }
+
+        logger.info(
+            "uninstall_skill start by gateway rpc, agent_id=%s slug=%s",
+            agent_id,
+            skill_name,
+        )
+        try:
+            with self._open_connection() as ws:
+                payload = self._rpc(
+                    ws,
+                    method="skills.update",
+                    params=params,
+                )
+        except OpenClawGatewayClientError as exc:
+            logger.error(
+                "uninstall_skill failed by gateway rpc, agent_id=%s skillKey=%s code=%s message=%s",
+                agent_id,
+                skill_name,
+                exc.code,
+                exc.message,
+            )
+            raise
+        logger.info(
+            "uninstall_skill success by gateway rpc, agent_id=%s slug=%s payload_keys=%s",
+            agent_id,
+            skill_name,
+            sorted(payload.keys()),
+        )
         return payload
 
     # 删除 runtime 侧会话，优先使用 session.delete，若网关不支持则回退 sessions.delete。
@@ -424,6 +492,12 @@ class OpenClawGatewayClient(ClientBase):
             error = message.get("error")
             code = "GATEWAY_RPC_ERROR"
             text = f"openclaw rpc failed: {method}"
+            logger.info(
+                "openclaw rpc failed:, error=%s message=%s method=%s",
+                error,
+                message,
+                method,
+            )            
             if isinstance(error, dict):
                 raw_code = error.get("code")
                 if isinstance(raw_code, str) and raw_code:
