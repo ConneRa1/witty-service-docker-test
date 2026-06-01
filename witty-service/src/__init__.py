@@ -1,2 +1,0 @@
-"""Witty service package."""
-

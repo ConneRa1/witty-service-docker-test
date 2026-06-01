@@ -1,0 +1,1 @@
+"""Bundled OpenClaw materialization pipeline."""
