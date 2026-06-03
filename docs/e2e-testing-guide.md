@@ -111,25 +111,6 @@ curl -s http://127.0.0.1:8000/healthz
 | `/healthz` | `GET` | 服务存活检查 |
 | `/agents` | `POST` | 创建 Agent |
 | `/agents` | `GET` | 列出所有 Agent |
-| `/agents/{agent_id}` | `GET` | 获取 Agent 详情 |
-| `/agents/{agent_id}` | `DELETE` | 删除 Agent |
-| `/agents/{agent_id}/pause` | `POST` | 暂停 Agent |
-| `/agents/{agent_id}/resume` | `POST` | 恢复 Agent |
-| `/agents/{agent_id}/sessions` | `GET` | 列出所有会话 |
-| `/agents/{agent_id}/sessions` | `POST` | 创建会话 |
-| `/agents/{agent_id}/sessions/{session_id}` | `GET` | 获取会话详情 |
-| `/agents/{agent_id}/sessions/{session_id}` | `DELETE` | 删除会话 |
-| `/agents/{agent_id}/sessions/{session_id}/messages` | `POST` | 发送消息 |
-| `/agents/{agent_id}/sessions/{session_id}/messages/stream` | `POST` | 发送消息并以 SSE 流返回 |
-| `/models` | `POST` | 添加大模型配置 |
-| `/models` | `GET` | 获取大模型列表 |
-| `/models/{model_id}` | `DELETE` | 删除大模型配置 |
-| `/agents/{agent_id}/sessions/{session_id}/events` | `GET` | 查询会话事件回放 |
-| `/agents/{agent_id}/sessions/{session_id}/abort` | `POST` | 中止会话：中止正在运行的会话 |
-| `/agents/{agent_id}/conversations` | `GET` | 列出会话摘要：查询本地数据库，返回会话列表及最新消息摘要 |
-| `/agents/{agent_id}/conversations/{session_id}` | `GET` | 获取会话详情：查询本地数据库，支持消息分页（limit/before） |
-| `/agents/{agent_id}/conversations/{session_id}` | `PATCH` | 更新会话元数据：修改标题、置顶状态，仅更新本地数据库 |
-| `/agents/{agent_id}/sessions/{session_id}/messages/stream/reconnect` | `POST` | SSE 流重连：重新连接到已有消息流，通过 WebSocket 接收事件 |
 | `/skills/repos` | `GET` | 查询技能仓库列表 |
 | `/skills/repos` | `POST` | 通过 Git 仓库注册技能仓库，并异步触发 discover |
 | `/skills/repos/upload` | `POST` | 上传 ZIP 压缩包注册本地技能仓库，并异步触发 discover |
@@ -139,10 +120,29 @@ curl -s http://127.0.0.1:8000/healthz
 | `/skills/discover` | `POST` | 扫描全部技能仓库，刷新技能索引 |
 | `/skills/discover/{repo_id}` | `POST` | 扫描指定技能仓库，刷新技能索引 |
 | `/skills/skills` | `GET` | 查询已发现的技能清单 |
+| `/agents/{agent_id}` | `GET` | 获取 Agent 详情 |
+| `/agents/{agent_id}` | `DELETE` | 删除 Agent |
+| `/agents/{agent_id}/pause` | `POST` | 暂停 Agent |
+| `/agents/{agent_id}/resume` | `POST` | 恢复 Agent |
 | `/agents/{agent_id}/skills/` | `POST` | 为 agent 安装技能，并写入安装记录 |
 | `/agents/{agent_id}/skills/installed` | `GET` | 查询已安装技能：查询本地数据库，返回 agent 已安装的技能列表 |
 | `/agents/{agent_id}/skills/installed/sync` | `POST` | 从 runtime 拉取已安装技能并同步本地记录 |
 | `/agents/{agent_id}/skills/uninstall` | `POST` | 卸载 agent 已安装技能，并清理本地记录 |
+| `/agents/{agent_id}/sessions` | `GET` | 列出所有会话 |
+| `/agents/{agent_id}/sessions` | `POST` | 创建会话 |
+| `/agents/{agent_id}/sessions/{session_id}` | `GET` | 获取会话详情 |
+| `/agents/{agent_id}/sessions/{session_id}` | `DELETE` | 删除会话 |
+| `/agents/{agent_id}/sessions/{session_id}/messages` | `POST` | 发送消息 |
+| `/agents/{agent_id}/sessions/{session_id}/messages/stream` | `POST` | 发送消息并以 SSE 流返回 |
+| `/agents/{agent_id}/sessions/{session_id}/messages/stream/reconnect` | `POST` | SSE 流重连：重新连接到已有消息流，通过 WebSocket 接收事件 |
+| `/agents/{agent_id}/sessions/{session_id}/events` | `GET` | 查询会话事件回放 |
+| `/agents/{agent_id}/sessions/{session_id}/abort` | `POST` | 中止会话：中止正在运行的会话 |
+| `/agents/{agent_id}/conversations` | `GET` | 列出会话摘要：查询本地数据库，返回会话列表及最新消息摘要 |
+| `/agents/{agent_id}/conversations/{session_id}` | `GET` | 获取会话详情：查询本地数据库，支持消息分页（limit/before） |
+| `/agents/{agent_id}/conversations/{session_id}` | `PATCH` | 更新会话元数据：修改标题、置顶状态，仅更新本地数据库 |
+| `/models` | `POST` | 添加大模型配置 |
+| `/models` | `GET` | 获取大模型列表 |
+| `/models/{model_id}` | `DELETE` | 删除大模型配置 |
 
 说明：
 - `GET /agents/{agent_id}/sessions`
