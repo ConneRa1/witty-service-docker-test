@@ -111,26 +111,38 @@ curl -s http://127.0.0.1:8000/healthz
 | `/healthz` | `GET` | 服务存活检查 |
 | `/agents` | `POST` | 创建 Agent |
 | `/agents` | `GET` | 列出所有 Agent |
+| `/skills/repos` | `GET` | 查询技能仓库列表 |
+| `/skills/repos` | `POST` | 通过 Git 仓库注册技能仓库，并异步触发 discover |
+| `/skills/repos/upload` | `POST` | 上传 ZIP 压缩包注册本地技能仓库，并异步触发 discover |
+| `/skills/repos/{repo_id}` | `GET` | 查询单个技能仓库详情 |
+| `/skills/repos/{repo_id}` | `PATCH` | 更新技能仓库配置 |
+| `/skills/repos/{repo_id}` | `DELETE` | 删除技能仓库及其本地归档/解压目录 |
+| `/skills/discover` | `POST` | 扫描全部技能仓库，刷新技能索引 |
+| `/skills/discover/{repo_id}` | `POST` | 扫描指定技能仓库，刷新技能索引 |
+| `/skills/skills` | `GET` | 查询已发现的技能清单 |
 | `/agents/{agent_id}` | `GET` | 获取 Agent 详情 |
 | `/agents/{agent_id}` | `DELETE` | 删除 Agent |
 | `/agents/{agent_id}/pause` | `POST` | 暂停 Agent |
 | `/agents/{agent_id}/resume` | `POST` | 恢复 Agent |
+| `/agents/{agent_id}/skills/` | `POST` | 为 agent 安装技能，并写入安装记录 |
+| `/agents/{agent_id}/skills/installed` | `GET` | 查询已安装技能：查询本地数据库，返回 agent 已安装的技能列表 |
+| `/agents/{agent_id}/skills/installed/sync` | `POST` | 从 runtime 拉取已安装技能并同步本地记录 |
+| `/agents/{agent_id}/skills/uninstall` | `POST` | 卸载 agent 已安装技能，并清理本地记录 |
 | `/agents/{agent_id}/sessions` | `GET` | 列出所有会话 |
 | `/agents/{agent_id}/sessions` | `POST` | 创建会话 |
 | `/agents/{agent_id}/sessions/{session_id}` | `GET` | 获取会话详情 |
 | `/agents/{agent_id}/sessions/{session_id}` | `DELETE` | 删除会话 |
 | `/agents/{agent_id}/sessions/{session_id}/messages` | `POST` | 发送消息 |
 | `/agents/{agent_id}/sessions/{session_id}/messages/stream` | `POST` | 发送消息并以 SSE 流返回 |
-| `/models` | `POST` | 添加大模型配置 |
-| `/models` | `GET` | 获取大模型列表 |
-| `/models/{model_id}` | `DELETE` | 删除大模型配置 |
+| `/agents/{agent_id}/sessions/{session_id}/messages/stream/reconnect` | `POST` | SSE 流重连：重新连接到已有消息流，通过 WebSocket 接收事件 |
 | `/agents/{agent_id}/sessions/{session_id}/events` | `GET` | 查询会话事件回放 |
 | `/agents/{agent_id}/sessions/{session_id}/abort` | `POST` | 中止会话：中止正在运行的会话 |
 | `/agents/{agent_id}/conversations` | `GET` | 列出会话摘要：查询本地数据库，返回会话列表及最新消息摘要 |
 | `/agents/{agent_id}/conversations/{session_id}` | `GET` | 获取会话详情：查询本地数据库，支持消息分页（limit/before） |
 | `/agents/{agent_id}/conversations/{session_id}` | `PATCH` | 更新会话元数据：修改标题、置顶状态，仅更新本地数据库 |
-| `/agents/{agent_id}/sessions/{session_id}/messages/stream/reconnect` | `POST` | SSE 流重连：重新连接到已有消息流，通过 WebSocket 接收事件 |
-| `/agents/{agent_id}/skills/installed` | `GET` | 查询已安装技能：查询本地数据库，返回 agent 已安装的技能列表 |
+| `/models` | `POST` | 添加大模型配置 |
+| `/models` | `GET` | 获取大模型列表 |
+| `/models/{model_id}` | `DELETE` | 删除大模型配置 |
 
 说明：
 - `GET /agents/{agent_id}/sessions`
@@ -148,7 +160,185 @@ Agent 接口与 `runtime_agent_id` 的关系：
 - `POST /agents`、`GET /agents`、`GET /agents/{agent_id}`、`DELETE /agents/{agent_id}`、`POST /agents/{agent_id}/pause`、`POST /agents/{agent_id}/resume` 这些 Agent 生命周期接口**不直接接收** `runtime_agent_id`
 - `runtime_agent_id` 只影响 session 相关接口的远端路由选择，不改变 `witty-service` 自己的 agent 主键语义
 
-### 3.3 Agent 生命周期接口
+### 3.3 Skills 仓库与技能目录接口
+
+这一组接口由 `src/witty_service/api/skills.py` 提供，统一挂载在 `/skills` 前缀下，并要求 Bearer Token 认证。
+
+#### 1. 技能仓库生命周期
+
+支持两类可注册仓库来源：
+
+| `source_type` | 说明 | 必填字段 |
+| --- | --- | --- |
+| `git` | 从 Git 仓库拉取技能目录 | `url` |
+| `local` | 从本地 ZIP 归档注册技能目录 | `local_path`（通常由上传接口生成） |
+
+说明：
+- `builtin`、`clawhub` 会出现在技能记录的来源字段中，但当前不作为 `POST /skills/repos`、`PATCH /skills/repos/{repo_id}` 的可写入来源。
+- Git 仓库名会按 `url[@branch]` 归一化后生成，重复注册会返回 `400`。
+- 上传 ZIP 时会校验压缩包格式、大小、文件数量和解压后总体积。
+
+```mermaid
+flowchart TD
+    A[注册技能仓库] --> B{来源类型}
+    B -->|git| C[POST /skills/repos]
+    B -->|zip 上传| D[POST /skills/repos/upload]
+    C --> E[写入仓库记录 status=init]
+    D --> E
+    E --> F[BackgroundTasks 异步 discover]
+    F --> G[扫描 skill.md / 元数据]
+    G --> H[更新 skills 表与 skill_num]
+    H --> I[status=done 或 failed]
+```
+
+#### 2. `GET /skills/repos`
+
+- 接口描述：列出所有已注册技能仓库
+- 输出 `200`：`list[SkillRepositoryResponse]`
+
+```json
+[
+  {
+    "repo_id": "repo-uuid",
+    "repo_name": "https://github.com/example/skills@main",
+    "source_type": "git",
+    "branch": "main",
+    "url": "https://github.com/example/skills",
+    "local_path": "/home/user/witty-service/skill-repositories/skills-repo-uuid",
+    "skill_discover_status": "done",
+    "skill_num": 12
+  }
+]
+```
+
+#### 3. `POST /skills/repos`
+
+- 接口描述：注册一个 Git 技能仓库，并异步开始扫描
+- 输入（`SkillRepositoryRequest`）：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `source_type` | string | 是 | 固定为 `git` |
+| `url` | string | 是 | Git clone 地址，支持 HTTPS / SSH，服务端会做归一化 |
+| `branch` | string | 否 | 指定分支；为空时 discover 后会自动回填实际分支 |
+| `local_path` | string | 否 | Git 来源下忽略 |
+
+- 输出 `201`：`SkillRepositoryResponse`
+- 额外说明：
+  - 仅创建仓库记录，不会同步等待扫描结束。
+  - 接口返回后由 `BackgroundTasks` 调用 discover，初始状态通常为 `init`。
+
+请求示例：
+
+```json
+{
+  "source_type": "git",
+  "url": "https://github.com/example/skills.git",
+  "branch": "main"
+}
+```
+
+#### 4. `POST /skills/repos/upload`
+
+- 接口描述：上传 ZIP 归档注册本地技能仓库，并异步开始扫描
+- 请求类型：`multipart/form-data`
+- 表单字段：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `file` | file | 是 | 仅支持 `.zip` 文件 |
+
+- 输出 `201`：`SkillRepositoryResponse`
+- 额外说明：
+  - 上传文件大小上限为 `50MB`。
+  - 解压预校验上限为 `100MB` 总体积、`1000` 个条目。
+  - 成功后 `source_type` 为 `local`，`local_path` 指向保存下来的 ZIP 文件路径。
+
+#### 5. `GET /skills/repos/{repo_id}`
+
+- 接口描述：获取单个技能仓库详情
+- 输出 `200`：`SkillRepositoryResponse`
+- 异常：
+  - 仓库不存在时返回 `404`
+
+#### 6. `PATCH /skills/repos/{repo_id}`
+
+- 接口描述：更新技能仓库配置
+- 输入（`SkillRepositoryRequest`）：支持局部更新，但仍会校验来源类型和必填字段约束
+- 输出 `200`：`SkillRepositoryResponse`
+- 说明：
+  - 更新 Git 仓库时可修改 `url`、`branch`
+  - 更新本地仓库时可修改 `local_path`
+
+#### 7. `DELETE /skills/repos/{repo_id}`
+
+- 接口描述：删除技能仓库记录，并尽量清理本地归档或 clone 目录
+- 输出 `204`：无返回内容
+- 说明：
+  - 若 `local_path` 指向 ZIP 文件，会同时尝试删除归档和对应解压目录
+  - 若 `local_path` 指向 clone 目录，会尝试删除整个目录
+  - 清理失败只记日志，不阻止仓库记录删除
+
+#### 8. `POST /skills/discover`
+
+- 接口描述：同步扫描全部技能仓库，刷新 skills 索引
+- 输出 `200`：`list[SkillRepositoryResponse]`
+- 说明：
+  - 会逐个仓库更新 `skill_discover_status`
+  - 扫描失败时对应仓库会被标记为 `failed`，并清空该仓库下现有技能记录
+
+#### 9. `POST /skills/discover/{repo_id}`
+
+- 接口描述：同步扫描指定仓库
+- 输出 `200`：`SkillRepositoryResponse`
+- 特殊返回：
+  - 当仓库已经处于 discover 中，接口返回 `202 Accepted`
+- 常见状态流转：
+
+```mermaid
+stateDiagram-v2
+    [*] --> init
+    init --> discovering
+    failed --> discovering
+    done --> discovering
+    discovering --> done
+    discovering --> failed
+```
+
+#### 10. `GET /skills/skills`
+
+- 接口描述：列出当前已发现的技能清单
+- 输出 `200`：`list[SkillResponse]`
+
+```json
+[
+  {
+    "skill_id": "skill-uuid",
+    "repo_id": "repo-uuid",
+    "skill_name": "terminal-helper",
+    "relative_path": "skills/terminal-helper/SKILL.md",
+    "metadata": {
+      "title": "Terminal Helper"
+    },
+    "skill_source": "git",
+    "skill_md_url": "https://github.com/example/skills/blob/main/skills/terminal-helper/SKILL.md"
+  }
+]
+```
+
+`SkillResponse` 字段说明：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `skill_id` | string | 技能唯一标识 |
+| `repo_id` | string \| null | 所属仓库 ID；第三方聚合来源可能为空 |
+| `skill_name` | string | 技能名 |
+| `relative_path` | string \| null | `SKILL.md` 相对路径或绝对路径 |
+| `metadata` | object | 技能元数据 |
+| `skill_source` | string \| null | 技能来源，如 `git`、`local`、`builtin`、`clawhub` |
+| `skill_md_url` | string \| null | 技能说明文档地址 |
+
+### 3.4 Agent 生命周期接口
 
 #### 1. `POST /agents`
 
@@ -347,7 +537,129 @@ Agent 接口与 `runtime_agent_id` 的关系：
 }
 ```
 
-### 3.4 Session 接口
+### 3.5 Agent 技能安装接口
+
+这一组接口由 `src/witty_service/api/agents.py` 中的 skills 相关路由提供，统一挂载在 `/agents/{agent_id}/skills/*`。
+
+设计上分成两层：
+
+- `/skills/*` 管理“可被发现的技能目录”
+- `/agents/{agent_id}/skills/*` 管理“某个 agent 已安装了哪些技能”
+
+```mermaid
+flowchart LR
+    A[技能仓库 /skills/repos] --> B[discover 扫描]
+    B --> C[/skills/skills 技能目录]
+    C --> D[POST /agents/{agent_id}/skills/]
+    D --> E[调用 runtime 安装]
+    E --> F[写入 installed_agent_skills]
+    F --> G[GET /agents/{agent_id}/skills/installed]
+```
+
+#### 1. `POST /agents/{agent_id}/skills/`
+
+- 接口描述：为指定 agent 安装一个已发现技能
+- 输入（`InstallAgentSkillRequest`）：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `skill_id` | string | 是 | 技能唯一标识 |
+| `skill_name` | string | 是 | 技能名；主要用于错误详情和日志 |
+
+- 输出 `202`：`AgentSkillResponse`
+- 执行流程：
+  1. 按 `skill_id` 校验技能是否存在
+  2. 解析技能来源目录 `source_path`
+  3. 调用 runtime 执行安装
+  4. 安装成功后写入本地安装记录
+
+- 关键行为说明：
+  - 若 runtime 已安装成功，但本地安装记录写入失败，会返回业务错误 `SKILL_INSTALL_RECORD_FAILED`
+  - `source_path` 的解析规则：
+    - `relative_path` 为绝对路径：直接取其父目录
+    - Git / 本地 ZIP 技能：由仓库 `local_path` 与 `relative_path` 拼接得到
+    - `clawhub` 等无本地目录技能：返回 `None`
+
+请求示例：
+
+```json
+{
+  "skill_id": "skill-uuid",
+  "skill_name": "terminal-helper"
+}
+```
+
+返回示例：
+
+```json
+{
+  "agent_id": "agent-uuid",
+  "skill_id": "skill-uuid",
+  "source_type": "git",
+  "repo_id": "repo-uuid",
+  "skill_name": "terminal-helper",
+  "installed_at": "2026-06-03T10:00:00Z",
+  "relative_path": "skills/terminal-helper/SKILL.md",
+  "metadata": {
+    "title": "Terminal Helper"
+  },
+  "skill_source": "git",
+  "skill_md_url": "https://github.com/example/skills/blob/main/skills/terminal-helper/SKILL.md"
+}
+```
+
+#### 2. `GET /agents/{agent_id}/skills/installed`
+
+- 接口描述：读取本地数据库中该 agent 的已安装技能记录
+- 输出 `200`：`list[AgentSkillResponse]`
+- 说明：
+  - 这是“本地记录视角”，不主动向 runtime 拉取实时状态
+  - 若 agent 不存在，返回 `AGENT_NOT_FOUND`
+
+#### 3. `POST /agents/{agent_id}/skills/installed/sync`
+
+- 接口描述：主动从 runtime 拉取已安装技能并同步到本地，再返回最新结果
+- 输出 `200`：`list[AgentSkillResponse]`
+- 适用场景：
+  - runtime 侧已发生技能变化，但本地记录可能未及时更新
+  - 前端进入“已安装技能”页面前，想先做一次对齐
+
+#### 4. `POST /agents/{agent_id}/skills/uninstall`
+
+- 接口描述：卸载 agent 上的某个已安装技能
+- 输入（`UninstallAgentSkillRequest`）：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `skill_id` | string | 是 | 已安装技能 ID |
+
+- 输出 `200`：`AgentSkillResponse`，返回的是被卸载前的安装记录
+- 执行流程：
+  1. 从本地安装记录表查找目标技能
+  2. 尝试解析技能目录 `source_path`
+  3. 调用 runtime 执行卸载
+  4. 删除本地安装记录
+
+- 说明：
+  - 若本地安装记录不存在，返回 `SKILL_NOT_FOUND`
+  - 若 runtime 卸载成功但本地记录删除失败，返回 `SKILL_UNINSTALL_RECORD_FAILED`
+
+`AgentSkillResponse` 字段说明：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `agent_id` | string | 所属 agent |
+| `skill_id` | string | 技能 ID |
+| `source_type` | string | 安装来源类型 |
+| `repo_id` | string \| null | 来源仓库 ID |
+| `skill_name` | string | 技能名 |
+| `installed_at` | datetime | 安装时间，统一序列化为 UTC ISO8601 |
+| `relative_path` | string \| null | 技能文档相对路径 |
+| `metadata` | object \| null | 技能元数据 |
+| `skill_source` | string \| null | 技能来源 |
+| `skill_md_url` | string \| null | 技能说明地址 |
+
+### 3.6 Session 接口
 
 #### 1. `GET /agents/{agent_id}/sessions`
 
@@ -431,7 +743,7 @@ Agent 接口与 `runtime_agent_id` 的关系：
 }
 ```
 
-### 3.5 消息接口
+### 3.7 消息接口
 
 #### `POST /agents/{agent_id}/sessions/{session_id}/messages`
 
@@ -509,7 +821,7 @@ data: {"sandbox_type":"local_process","event":{"type":"message.delta","session_i
   - `event` 的内容保持上游 envelope 结构，包含来自上游 runtime 的 `runtime_type`，不额外嵌套 `sandbox_type`。
   - session 状态同步规则为：收到运行中事件时更新为 `running`，收到 `message.completed` 后收敛为 `idle`，收到 `client.error` / `stream.error` 或 WS 异常时更新为 `error`。
 
-### 3.6 事件类型
+### 3.8 事件类型
 
 | type | 含义 | payload 关键字段 |
 |------|------|------------------|
@@ -522,7 +834,7 @@ data: {"sandbox_type":"local_process","event":{"type":"message.delta","session_i
 | `stream.error` | 运行时流异常 | `code`, `message` |
 | `client.error` | 客户端事件错误 | `code`, `message`, `details` |
 
-### 3.6 大模型配置接口
+### 3.9 大模型配置接口
 
 #### 1. `POST /models`
 
@@ -644,7 +956,7 @@ data: {"sandbox_type":"local_process","event":{"type":"message.delta","session_i
 | `MODEL_CREATE_FAILED` | 500 | 模型配置创建失败 |
 | `MODEL_DELETE_FAILED` | 500 | 模型配置删除失败 |
 
-### 3.7 常见错误码
+### 3.10 常见错误码
 
 | code | HTTP 状态码 | 说明 |
 |------|-------------|------|
@@ -664,6 +976,10 @@ data: {"sandbox_type":"local_process","event":{"type":"message.delta","session_i
 | `RUNTIME_BACKUP_NOT_FOUND` | 404 | 运行时备份不存在 |
 | `RUNTIME_BACKUP_RESTORE_FAILED` | 500 | 恢复备份失败 |
 | `RUNTIME_START_FAILED` | 500 | 启动运行时失败 |
+| `SKILL_NOT_FOUND` | 404 | 技能不存在，或 agent 上未找到已安装技能记录 |
+| `SKILL_SYNC_FAILED` | 500 | 从 runtime 同步已安装技能失败 |
+| `SKILL_INSTALL_RECORD_FAILED` | 500 | runtime 已安装成功，但本地安装记录持久化失败 |
+| `SKILL_UNINSTALL_RECORD_FAILED` | 500 | runtime 已卸载成功，但本地安装记录删除失败 |
 
 **HTTP 状态码映射规则：**
 - 以 `_NOT_FOUND` 结尾 → `404`
