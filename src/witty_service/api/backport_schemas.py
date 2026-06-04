@@ -23,6 +23,7 @@ class BackportConfigPayload(BaseModel):
     signer_name: str = ""
     signer_email: str = ""
     commit_message_template: str = DEFAULT_COMMIT_MESSAGE_TEMPLATE
+    commit_message_source: str = "auto"
     linux_repo_path: str = "~/Image/linux"
     commit_sort: str = "describe"
     current_excel_path: str = ""
@@ -38,6 +39,14 @@ class BackportConfigUpdateResponse(BaseModel):
 class BackportRunRequest(BaseModel):
     action: str
     payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class BackportAsyncRunResponse(BaseModel):
+    run_id: str
+    action: str
+    status: str
+    result: dict[str, Any] | None = None
+    error: str = ""
 
 
 class BackportToolSnapshotResponse(BaseModel):

@@ -34,6 +34,7 @@ def _default_config() -> dict[str, str]:
         "signer_name": "",
         "signer_email": "",
         "commit_message_template": DEFAULT_COMMIT_MESSAGE_TEMPLATE,
+        "commit_message_source": "auto",
         "linux_repo_path": "~/Image/linux",
         "commit_sort": "describe",
         "current_excel_path": "",
@@ -68,6 +69,9 @@ class BackportService:
         for key in config:
             value = loaded.get(key, "")
             config[key] = value if isinstance(value, str) else ""
+        config["commit_message_source"] = self._normalize_commit_message_source(
+            config.get("commit_message_source", "")
+        )
         logger.info(
             "Backport config loaded: path=%s target_path=%s target_release=%s current_report=%s",
             self._config_path,
@@ -82,6 +86,9 @@ class BackportService:
         for key in config:
             value = payload.get(key, "")
             config[key] = value.strip() if isinstance(value, str) else ""
+        config["commit_message_source"] = self._normalize_commit_message_source(
+            config.get("commit_message_source", "")
+        )
 
         self._config_path.parent.mkdir(parents=True, exist_ok=True)
         self._config_path.write_text(
@@ -207,6 +214,7 @@ class BackportService:
                 signer_name=config["signer_name"],
                 signer_email=config["signer_email"],
                 commit_message_template=config["commit_message_template"],
+                commit_message_source=config["commit_message_source"],
                 linux_repo_path=config["linux_repo_path"],
                 commit_sort=config["commit_sort"],
             )
@@ -311,6 +319,7 @@ class BackportService:
                 signer_name=config["signer_name"],
                 signer_email=config["signer_email"],
                 commit_message_template=config["commit_message_template"],
+                commit_message_source=config["commit_message_source"],
                 linux_repo_path=config["linux_repo_path"],
                 working_report_path=working_report_path,
             )
@@ -345,6 +354,9 @@ class BackportService:
                 base_report_path=base_report_path,
                 row=row,
                 commit_message_template=config["commit_message_template"],
+                commit_message_source=config["commit_message_source"],
+                signer_name=config["signer_name"],
+                signer_email=config["signer_email"],
                 linux_repo_path=config["linux_repo_path"],
                 working_report_path=working_report_path,
             )
@@ -389,6 +401,7 @@ class BackportService:
                 base_report_path=base_report_path,
                 row=row,
                 commit_message_template=template_override or config["commit_message_template"],
+                commit_message_source=config["commit_message_source"],
                 linux_repo_path=config["linux_repo_path"],
                 working_report_path=working_report_path,
             )
@@ -544,6 +557,10 @@ class BackportService:
             if isinstance(value, str) and value.strip():
                 return value.strip()
         return ""
+
+    @staticmethod
+    def _normalize_commit_message_source(value: str) -> str:
+        return value if value in {"auto", "openEuler", "upstream"} else "auto"
 
     def _resolve_target_path(
         self,

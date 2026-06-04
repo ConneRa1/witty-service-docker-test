@@ -185,6 +185,7 @@ class BackportCvekitClient:
             capture_output=True, text=True, encoding="utf-8", check=False,
         )
         if result.returncode != 0:
+            redacted_cmd = self._redact_command(cmd)
             raise RuntimeError(
                 "cvekit 执行失败\n"
                 f"command: {' '.join(redacted_cmd)}\n"
@@ -655,6 +656,7 @@ class BackportCvekitClient:
         signer_name: str,
         signer_email: str,
         commit_message_template: str,
+        commit_message_source: str,
         linux_repo_path: str,
         commit_sort: str = "describe",
     ) -> dict[str, Any]:
@@ -694,6 +696,7 @@ class BackportCvekitClient:
             "signer_name": signer_name,
             "signer_email": signer_email,
             "commit_message_template": commit_message_template,
+            "commit_message_source": self._normalize_commit_message_source(commit_message_source),
             "linux_repo_path": linux_repo_path,
             "commit_sort": commit_sort,
         }.items():
@@ -873,6 +876,7 @@ class BackportCvekitClient:
         signer_name: str,
         signer_email: str,
         commit_message_template: str,
+        commit_message_source: str,
         linux_repo_path: str,
         working_report_path: str | None = None,
     ) -> dict[str, Any]:
@@ -936,6 +940,9 @@ class BackportCvekitClient:
             config_data["target_path"] = target_path.strip()
         if commit_message_template.strip():
             config_data["commit_message_template"] = commit_message_template
+        commit_message_source = self._normalize_commit_message_source(commit_message_source)
+        if commit_message_source != "auto":
+            config_data["commit_message_source"] = commit_message_source
         if linux_repo_path.strip():
             config_data["linux_repo_path"] = linux_repo_path.strip()
         with filtered_report_path.open("w", encoding="utf-8") as handle:
@@ -974,6 +981,9 @@ class BackportCvekitClient:
         base_report_path: str,
         row: dict[str, Any],
         commit_message_template: str,
+        commit_message_source: str,
+        signer_name: str,
+        signer_email: str,
         linux_repo_path: str,
         working_report_path: str | None = None,
     ) -> dict[str, Any]:
@@ -1011,6 +1021,9 @@ class BackportCvekitClient:
         self._override_commit_message_config(
             apply_config_path,
             commit_message_template=commit_message_template,
+            commit_message_source=commit_message_source,
+            signer_name=signer_name,
+            signer_email=signer_email,
             linux_repo_path=linux_repo_path,
         )
 
@@ -1050,6 +1063,7 @@ class BackportCvekitClient:
         base_report_path: str,
         row: dict[str, Any],
         commit_message_template: str,
+        commit_message_source: str,
         linux_repo_path: str,
         working_report_path: str | None = None,
     ) -> dict[str, Any]:
@@ -1078,6 +1092,9 @@ class BackportCvekitClient:
         ]
         if commit_message_template.strip():
             cmd.extend(["--commit-message-template", commit_message_template])
+        commit_message_source = self._normalize_commit_message_source(commit_message_source)
+        if commit_message_source != "auto":
+            cmd.extend(["--commit-message-source", commit_message_source])
         if linux_repo_path.strip():
             cmd.extend(["--linux-repo-path", linux_repo_path.strip()])
         result = self._run_cvekit(cmd, env, preview_config_path.parent)
@@ -1137,6 +1154,9 @@ class BackportCvekitClient:
         config_path: Path,
         *,
         commit_message_template: str,
+        commit_message_source: str,
+        signer_name: str,
+        signer_email: str,
         linux_repo_path: str,
     ) -> None:
         try:
@@ -1148,6 +1168,13 @@ class BackportCvekitClient:
             raise ValueError(f"backport 配置不是对象: {config_path}")
         if commit_message_template.strip():
             config_data["commit_message_template"] = commit_message_template
+        commit_message_source = BackportCvekitClient._normalize_commit_message_source(commit_message_source)
+        if commit_message_source != "auto":
+            config_data["commit_message_source"] = commit_message_source
+        if signer_name.strip():
+            config_data["signer_name"] = signer_name.strip()
+        if signer_email.strip():
+            config_data["signer_email"] = signer_email.strip()
         if linux_repo_path.strip():
             config_data["linux_repo_path"] = linux_repo_path.strip()
         with config_path.open("w", encoding="utf-8") as handle:
@@ -1168,3 +1195,7 @@ class BackportCvekitClient:
             if isinstance(val, str) and val.strip():
                 return val.strip()
         return json.dumps(row, ensure_ascii=False, sort_keys=True)
+
+    @staticmethod
+    def _normalize_commit_message_source(value: str) -> str:
+        return value if value in {"auto", "openEuler", "upstream"} else "auto"
