@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
@@ -20,7 +21,10 @@ logger = logging.getLogger(__name__)
 DEFAULT_GATEWAY_WS_URL = "ws://127.0.0.1:18789"
 _DEFAULT_CONNECT_TIMEOUT = 10.0
 _DEFAULT_EVENT_TIMEOUT = 30.0
-_DEFAULT_IDLE_TIMEOUT = float(os.environ.get("OPENCLAW_GATEWAY_IDLE_TIMEOUT", "30"))
+_DEFAULT_IDLE_TIMEOUT = float(os.environ.get("OPENCLAW_GATEWAY_IDLE_TIMEOUT", "1200"))
+_DEFAULT_LIFECYCLE_END_DRAIN_TIMEOUT = float(
+    os.environ.get("OPENCLAW_GATEWAY_LIFECYCLE_END_DRAIN_TIMEOUT", "60")
+)
 _DEFAULT_MIN_PROTOCOL = 3
 _DEFAULT_MAX_PROTOCOL = 4
 _DEFAULT_SCOPES = [
@@ -50,6 +54,7 @@ class OpenClawGatewayClient(ClientBase):
         connect_timeout: float = _DEFAULT_CONNECT_TIMEOUT,
         event_timeout: float = _DEFAULT_EVENT_TIMEOUT,
         idle_timeout: float = _DEFAULT_IDLE_TIMEOUT,
+        lifecycle_end_drain_timeout: float = _DEFAULT_LIFECYCLE_END_DRAIN_TIMEOUT,
     ) -> None:
         self._url = url
         logger.debug("OpenClawGatewayClient init token arg=%r", token)
@@ -58,6 +63,7 @@ class OpenClawGatewayClient(ClientBase):
         self._connect_timeout = connect_timeout
         self._event_timeout = event_timeout
         self._idle_timeout = idle_timeout
+        self._lifecycle_end_drain_timeout = lifecycle_end_drain_timeout
 
     # 对接openclaw流式化接口，适用于长时间运行的对话，能够持续接收事件直到对话结束。
     def stream_turn(
@@ -514,14 +520,36 @@ class OpenClawGatewayClient(ClientBase):
         session_key: str,
         run_id: str | None,
     ) -> Iterator[dict[str, Any]]:
+        pending_lifecycle_end: dict[str, Any] | None = None
+        lifecycle_end_deadline: float | None = None
+
         while True:
+            recv_timeout = self._idle_timeout
+            if lifecycle_end_deadline is not None:
+                remaining = lifecycle_end_deadline - time.monotonic()
+                if remaining <= 0:
+                    yield from self._flush_lifecycle_end(
+                        ws=ws,
+                        session_key=session_key,
+                        pending_lifecycle_end=pending_lifecycle_end,
+                    )
+                    return
+                recv_timeout = min(recv_timeout, remaining)
+
             try:
-                message = self._recv_json(ws, timeout=self._idle_timeout)
+                message = self._recv_json(ws, timeout=recv_timeout)
                 logger.debug(
                     "received message: %s",
                     json.dumps(message, indent=4, ensure_ascii=False),
                 )
             except TimeoutError:
+                if pending_lifecycle_end is not None:
+                    yield from self._flush_lifecycle_end(
+                        ws=ws,
+                        session_key=session_key,
+                        pending_lifecycle_end=pending_lifecycle_end,
+                    )
+                    return
                 return
             if message.get("type") != "event":
                 continue
@@ -575,41 +603,70 @@ class OpenClawGatewayClient(ClientBase):
                     )
                     if stop_reason == "stop" and not has_text:
                         continue
-            if event_name == "agent" and normalized_payload.get("stream") == "lifecycle":
-                phase = normalized_payload.get("data", {}).get("phase")
-                if phase == "end":
-                    # 刷新token usage
-                    usage_payload = self._fetch_session_usage(
-                        ws=ws, session_key=session_key
-                    )
-                    if usage_payload is not None:
-                        yield {
-                            "type": "session.usage",
-                            "payload": usage_payload,
-                        }
             event = {
                 "type": event_name,
                 "payload": normalized_payload,
             }
-            yield event
 
             if event_name != "agent":
+                yield event
+                if pending_lifecycle_end is not None:
+                    lifecycle_end_deadline = (
+                        time.monotonic() + self._lifecycle_end_drain_timeout
+                    )
                 continue
             stream = normalized_payload.get("stream")
             data = normalized_payload.get("data")
             if stream == "lifecycle" and isinstance(data, dict):
                 phase = data.get("phase")
-                if phase in {"end", "error"}:
+                if phase == "end":
+                    pending_lifecycle_end = event
+                    lifecycle_end_deadline = (
+                        time.monotonic() + self._lifecycle_end_drain_timeout
+                    )
                     logger.debug(
                         (
-                            "finish stream by lifecycle event: "
-                            "session_key=%s run_id=%s phase=%s"
+                            "delay lifecycle end to drain late session messages: "
+                            "session_key=%s run_id=%s timeout=%s"
                         ),
                         session_key,
                         run_id,
-                        phase,
+                        self._lifecycle_end_drain_timeout,
+                    )
+                    continue
+                if phase == "error":
+                    yield event
+                    logger.debug(
+                        (
+                            "finish stream by lifecycle error event: "
+                            "session_key=%s run_id=%s"
+                        ),
+                        session_key,
+                        run_id,
                     )
                     return
+
+            yield event
+            if pending_lifecycle_end is not None:
+                lifecycle_end_deadline = (
+                    time.monotonic() + self._lifecycle_end_drain_timeout
+                )
+
+    def _flush_lifecycle_end(
+        self,
+        *,
+        ws: Any,
+        session_key: str,
+        pending_lifecycle_end: dict[str, Any] | None,
+    ) -> Iterator[dict[str, Any]]:
+        usage_payload = self._fetch_session_usage(ws=ws, session_key=session_key)
+        if usage_payload is not None:
+            yield {
+                "type": "session.usage",
+                "payload": usage_payload,
+            }
+        if pending_lifecycle_end is not None:
+            yield pending_lifecycle_end
 
     # 统一抽取事件里的 session key，用于并发场景隔离不同会话事件流。
     def _extract_session_key(self, payload: dict[str, Any]) -> str | None:
