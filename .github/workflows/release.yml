@@ -1,0 +1,144 @@
+name: Semantic Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Run semantic-release in dry-run mode"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  release:
+    name: Semantic Release
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency: release
+    outputs:
+      version: ${{ steps.semantic_release.outputs.version }}
+      should_release: ${{ steps.semantic_release.outputs.should_release }}
+
+    steps:
+      - name: Checkout from GitHub
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GH_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: true
+          fetch-tags: true
+
+      - name: Add GitCode remote and fetch
+        run: |
+          git remote add gitcode https://oauth2:${{ secrets.GITCODE_TOKEN }}@gitcode.com/openeuler/witty-service.git
+          git fetch gitcode '+refs/heads/*:refs/remotes/gitcode/*' --force
+          git fetch gitcode '+refs/tags/*:refs/tags/*' --force
+          echo "=== Resetting master to GitCode ==="
+          git reset --hard gitcode/master
+          echo "=== Current commit ==="
+          git log --oneline -5
+          echo "=== Tags ==="
+          git tag --list | sort -V
+
+      - name: Configure Git user
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install ".[dev]"
+
+      - name: Semantic Release
+        id: semantic_release
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          RELEASE_OUTPUT=$(semantic-release version --no-commit --no-tag --no-changelog --no-push --no-vcs-release --print 2>&1)
+          echo "=== Release output ==="
+          echo "$RELEASE_OUTPUT"
+          if echo "$RELEASE_OUTPUT" | grep -qiE "already been released|no release will be made"; then
+            echo "should_release=false" >> $GITHUB_OUTPUT
+            echo "=== No release will be made, skipping version bump ==="
+          else
+            VERSION=$(echo "$RELEASE_OUTPUT" | grep -oP '\d+\.\d+\.\d+' | head -1)
+            echo "version=$VERSION" >> $GITHUB_OUTPUT
+            echo "should_release=true" >> $GITHUB_OUTPUT
+            echo "=== Next version: $VERSION ==="
+            if [ "${{ inputs.dry_run }}" != "true" ]; then
+              semantic-release version --no-commit
+            fi
+          fi
+
+      - name: Push tags and sync to GitHub
+        if: success() && inputs.dry_run != 'true' && steps.semantic_release.outputs.should_release == 'true'
+        run: |
+          echo "=== Pushing all tags to GitHub ==="
+          git push origin --tags --force
+          echo "=== Force pushing master to GitHub (sync from GitCode) ==="
+          git push origin master --force
+          echo "=== Remote tags ==="
+          git ls-remote --tags origin | grep -v '\^{}' | sort -V
+
+  build:
+    needs: release
+    if: inputs.dry_run != 'true' && needs.release.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+
+      - name: Set package version
+        run: |
+          sed -i 's/^version = ".*"/version = "${{ needs.release.outputs.version }}"/' pyproject.toml
+          echo "=== Version set to ${{ needs.release.outputs.version }} ==="
+          grep '^version' pyproject.toml
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install build
+
+      - name: Build package
+        run: python -m build
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_TOKEN }}
