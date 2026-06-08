@@ -142,7 +142,14 @@ curl -s http://127.0.0.1:8000/healthz
 | `/agents/{agent_id}/conversations/{session_id}` | `PATCH` | 更新会话元数据：修改标题、置顶状态，仅更新本地数据库 |
 | `/models` | `POST` | 添加大模型配置 |
 | `/models` | `GET` | 获取大模型列表 |
+| `/models/{model_id}` | `PUT` | 更新大模型配置 |
 | `/models/{model_id}` | `DELETE` | 删除大模型配置 |
+| `/mcp-servers` | `POST` | 添加 MCP Server 配置 |
+| `/mcp-servers` | `GET` | 获取 MCP Server 列表 |
+| `/mcp-servers/{server_id}` | `PUT` | 更新 MCP Server 配置 |
+| `/mcp-servers/{server_id}` | `DELETE` | 删除 MCP Server 配置 |
+| `/agents/{agent_id}/mcp-servers/{server_id}/enable` | `POST` | 启用 MCP Server：执行 `_setup_mcp`，将配置应用到 runtime |
+| `/agents/{agent_id}/mcp-servers/{server_id}/disable` | `POST` | 卸载 MCP Server：执行 `openclaw mcp unset`，从 runtime 移除配置 |
 
 说明：
 - `GET /agents/{agent_id}/sessions`
@@ -360,8 +367,7 @@ stateDiagram-v2
 | `sandbox_id` | string | 否 | 沙箱 ID |
 | `has_scheduled_tasks` | boolean | 否 | 是否有定时任务，默认 `false` |
 | `model_id` | string | 否 | 模型 ID，关联 `/models` 中配置的模型 |
-| `mcp_server_name` | string | 否 | MCP Server 名称 |
-| `mcp_server_config` | object | 否 | MCP 配置（JSON 格式） |
+| `mcp_server_list` | array | 否 | MCP Server ID 列表，关联 `/mcp-servers` 中配置的 MCP Server |
 
 - 输出 `201`（AgentResponse）：
 
@@ -377,6 +383,7 @@ stateDiagram-v2
   "workspace_path": "/path/to/workspace",
   "idle_timeout_seconds": 3600,
   "has_scheduled_tasks": false,
+  "mcp_server_list": ["mcp-server-id-1", "mcp-server-id-2"],
   "created_at": "2026-04-10T12:00:00",
   "updated_at": "2026-04-10T12:00:00",
   "default_session_id": "session-uuid"
@@ -396,8 +403,7 @@ stateDiagram-v2
 | `idle_timeout_seconds` | integer | 空闲超时时间 |
 | `has_scheduled_tasks` | boolean | 是否有定时任务 |
 | `model_id` | string \| null | 模型 ID |
-| `mcp_server_name` | string \| null | MCP Server 名称 |
-| `mcp_server_config` | object \| null | MCP 配置（JSON 格式） |
+| `mcp_server_list` | array | MCP Server ID 列表 |
 | `created_at` | datetime | 创建时间 |
 | `updated_at` | datetime | 更新时间 |
 | `default_session_id` | string \| null | 默认会话 ID |
@@ -426,6 +432,7 @@ stateDiagram-v2
     "workspace_path": "/path/to/workspace",
     "idle_timeout_seconds": 3600,
     "has_scheduled_tasks": false,
+    "mcp_server_list": ["mcp-server-id-1"],
     "created_at": "2026-04-10T12:00:00",
     "updated_at": "2026-04-10T12:00:00",
     "default_session_id": "session-uuid"
@@ -456,6 +463,7 @@ stateDiagram-v2
   "workspace_path": "/path/to/workspace",
   "idle_timeout_seconds": 3600,
   "has_scheduled_tasks": false,
+  "mcp_server_list": ["mcp-server-id-1"],
   "created_at": "2026-04-10T12:00:00",
   "updated_at": "2026-04-10T12:00:00",
   "default_session_id": "session-uuid"
@@ -502,6 +510,7 @@ stateDiagram-v2
   "workspace_path": "/path/to/workspace",
   "idle_timeout_seconds": 3600,
   "has_scheduled_tasks": false,
+  "mcp_server_list": ["mcp-server-id-1"],
   "created_at": "2026-04-10T12:00:00",
   "updated_at": "2026-04-10T12:30:00",
   "default_session_id": "session-uuid"
@@ -537,6 +546,7 @@ stateDiagram-v2
   "workspace_path": "/path/to/workspace",
   "idle_timeout_seconds": 3600,
   "has_scheduled_tasks": false,
+  "mcp_server_list": ["mcp-server-id-1"],
   "created_at": "2026-04-10T12:00:00",
   "updated_at": "2026-04-10T12:35:00",
   "default_session_id": "session-uuid"
@@ -927,7 +937,28 @@ data: {"sandbox_type":"local_process","event":{"type":"message.delta","session_i
 ]
 ```
 
-#### 3. `DELETE /models/{model_id}`
+#### 3. `PUT /models/{model_id}`
+
+- 接口描述：更新指定的大模型配置（支持局部更新，仅传入需要修改的字段）
+- 输入（`UpdateModelRequest`）：
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `model_id` | string | path | 模型配置唯一标识 |
+| `name` | string | 否 | 模型名称，如 `gpt-4o` |
+| `provider` | string | 否 | 模型提供商，更新时会根据新 provider 自动填充默认 `api_base_url` |
+| `api_key` | string | 否 | API 密钥 |
+| `api_base_url` | string | 否 | API 基础地址；若不传且 `provider` 有值，则按新 provider 自动设置 |
+| `enabled` | boolean | 否 | 是否启用 |
+| `max_tokens` | integer | 否 | 最大输出 tokens 数 |
+| `temperature` | number | 否 | 生成温度，范围 0-2 |
+| `is_default` | boolean | 否 | 是否设为默认模型 |
+
+- 输出 `200`：`ModelResponse`
+- 异常：
+  - 模型不存在时返回 `404 MODEL_NOT_FOUND`
+
+#### 4. `DELETE /models/{model_id}`
 
 - 接口描述：删除指定的大模型配置
 - 输入：
@@ -962,7 +993,148 @@ data: {"sandbox_type":"local_process","event":{"type":"message.delta","session_i
 | `MODEL_CREATE_FAILED` | 500 | 模型配置创建失败 |
 | `MODEL_DELETE_FAILED` | 500 | 模型配置删除失败 |
 
-### 3.10 常见错误码
+### 3.10 MCP Server 配置接口
+
+#### 1. `POST /mcp-servers`
+
+- 接口描述：添加新的 MCP Server 配置
+- 输入（CreateMcpServerRequest）：
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `mcp_server_config` | object | 是 | MCP 配置（JSON 格式），系统自动从配置的 key 中提取 `mcp_server_name` |
+
+- 输出 `201`（McpServerResponse）：
+
+```json
+{
+  "id": "server-uuid",
+  "mcp_server_name": "example-server",
+  "mcp_server_config": {
+    "example-server": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "mcp-server-example"
+      ]
+    }
+  },
+  "created_at": "2026-04-13T10:00:00",
+  "updated_at": "2026-04-13T10:00:00"
+}
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `id` | string | MCP Server 配置唯一标识 |
+| `mcp_server_name` | string | MCP Server 名称 |
+| `mcp_server_config` | object | MCP 配置（JSON 格式） |
+| `created_at` | datetime | 创建时间 |
+| `updated_at` | datetime | 更新时间 |
+
+#### 2. `GET /mcp-servers`
+
+- 接口描述：获取所有 MCP Server 配置列表
+- 输出 `200`：`list[McpServerResponse]`
+
+```json
+[
+  {
+    "id": "server-uuid-1",
+    "mcp_server_name": "example-server",
+    "mcp_server_config": {
+      "example-server": {
+        "command": "npx",
+        "args": [
+          "-y",
+          "mcp-server-example"
+        ]
+      }
+    },
+    "created_at": "2026-04-13T10:00:00",
+    "updated_at": "2026-04-13T10:00:00"
+  }
+]
+```
+
+#### 3. `PUT /mcp-servers/{server_id}`
+
+- 接口描述：更新指定的 MCP Server 配置（支持局部更新，仅传入需要修改的字段）
+- 输入（`UpdateMcpServerRequest`）：
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `server_id` | string | path | MCP Server 配置唯一标识 |
+| `mcp_server_name` | string | 否 | MCP Server 名称 |
+| `mcp_server_config` | object | 否 | MCP 配置（JSON 格式） |
+
+- 输出 `200`：`McpServerResponse`
+- 异常：
+  - Server 不存在时返回 `404 MCP_SERVER_NOT_FOUND`
+
+#### 4. `DELETE /mcp-servers/{server_id}`
+
+- 接口描述：删除指定的 MCP Server 配置
+- 输入：
+
+| 字段 | 类型 | 位置 | 说明 |
+|------|------|------|------|
+| `server_id` | string | path | MCP Server 配置唯一标识 |
+
+- 输出 `204`：无返回内容
+
+#### 5. `POST /agents/{agent_id}/mcp-servers/{server_id}/enable`
+
+- 接口描述：为指定 Agent 启用 MCP Server，执行 `_setup_mcp` 将配置应用到 runtime
+- 输入：
+
+| 字段 | 类型 | 位置 | 说明 |
+|------|------|------|------|
+| `agent_id` | string | path | Agent 唯一标识 |
+| `server_id` | string | path | MCP Server 配置唯一标识 |
+
+- 输出 `200`：`McpServerResponse`
+- 执行流程：
+  1. 校验 Agent 是否存在且处于运行状态
+  2. 根据 `server_id` 查询 MCP Server 配置
+  3. 调用 `_setup_mcp` 执行 `openclaw mcp set <mcp_server_name> <config>`
+  4. 返回 MCP Server 配置信息
+
+- 说明：
+  - 启用失败时仅记录警告日志，不阻断后续操作
+  - 若 Agent 未运行，返回 `AGENT_NOT_RUNNING`
+
+#### 6. `POST /agents/{agent_id}/mcp-servers/{server_id}/disable`
+
+- 接口描述：为指定 Agent 卸载 MCP Server，执行 `openclaw mcp unset <mcp_server_name>` 从 runtime 移除配置
+- 输入：
+
+| 字段 | 类型 | 位置 | 说明 |
+|------|------|------|------|
+| `agent_id` | string | path | Agent 唯一标识 |
+| `server_id` | string | path | MCP Server 配置唯一标识 |
+
+- 输出 `200`：`McpServerResponse`
+- 执行流程：
+  1. 校验 Agent 是否存在且处于运行状态
+  2. 根据 `server_id` 查询 MCP Server 配置
+  3. 调用 `_unset_mcp` 执行 `openclaw mcp unset <mcp_server_name>`
+  4. 返回 MCP Server 配置信息
+
+- 说明：
+  - 卸载失败时仅记录警告日志，不阻断后续操作
+  - 若 Agent 未运行，返回 `AGENT_NOT_RUNNING`
+
+**常见错误码：**
+
+| code | HTTP 状态码 | 说明 |
+|------|-------------|------|
+| `MCP_SERVER_NOT_FOUND` | 404 | MCP Server 配置不存在 |
+| `MCP_SERVER_DUPLICATE` | 409 | MCP Server 配置已存在 |
+| `MCP_SERVER_CREATE_FAILED` | 500 | MCP Server 配置创建失败 |
+| `MCP_SERVER_DELETE_FAILED` | 500 | MCP Server 配置删除失败 |
+
+### 3.11 常见错误码
 
 | code | HTTP 状态码 | 说明 |
 |------|-------------|------|

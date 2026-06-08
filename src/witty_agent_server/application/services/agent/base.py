@@ -28,6 +28,8 @@ class OpenClawLifecyclePort(Protocol):
 
     def mcp_set(self, name: str, config: dict[str, object]) -> None: ...
 
+    def mcp_unset(self, name: str) -> None: ...
+
     def onboard(
         self,
         *,
@@ -108,6 +110,25 @@ class AgentServiceBase(ABC):
 
     def resolve_default_agent(self) -> str:
         """解析默认 agent，默认不支持。"""
+        raise NotImplementedError
+
+    def setup_mcp(
+        self,
+        *,
+        agent_id: str | None = None,
+        mcp_server_name: str | None = None,
+        mcp_server_config: dict[str, Any] | None = None,
+    ) -> None:
+        """设置 MCP 配置，默认不支持。"""
+        raise NotImplementedError
+
+    def unset_mcp(
+        self,
+        *,
+        agent_id: str | None = None,
+        mcp_server_name: str | None = None,
+    ) -> None:
+        """卸载 MCP 配置，默认不支持。"""
         raise NotImplementedError
 
     def pause(self) -> Agent:

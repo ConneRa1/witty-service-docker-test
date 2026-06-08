@@ -17,6 +17,7 @@ from witty_service.api.schemas import (
     ConversationSummaryResponse,
     CreateAgentRequest,
     InstallAgentSkillRequest,
+    McpServerResponse,
     UninstallAgentSkillRequest,
     MessageEventsResponse,
     SendMessageRequest,
@@ -25,6 +26,7 @@ from witty_service.api.schemas import (
     UpdateConversationRequest,
 )
 from witty_service.api.services import ServiceContainer
+from witty_service.adapter.http_client import AdaptorHttpClient
 from witty_service.application.agent_manager import AGENT_NOT_FOUND, SKILL_NOT_FOUND, \
 SKILL_INSTALL_RECORD_FAILED, SKILL_UNINSTALL_RECORD_FAILED, SKILL_SYNC_FAILED, AgentCreateRequest
 from witty_service.application.skill_manager import SkillManager
@@ -56,8 +58,7 @@ def create_agent(
             sandbox_id=payload.sandbox_id,
             has_scheduled_tasks=payload.has_scheduled_tasks,
             model_id=payload.model_id,
-            mcp_server_name=payload.mcp_server_name,
-            mcp_server_config=payload.mcp_server_config,
+            mcp_server_list=payload.mcp_server_list,
         )
     )
 
@@ -565,8 +566,7 @@ def _to_agent_response(
         idle_timeout_seconds=agent.idle_timeout_seconds,
         has_scheduled_tasks=agent.has_scheduled_tasks,
         model_id=agent.model_id,
-        mcp_server_name=agent.mcp_server_name,
-        mcp_server_config=agent.mcp_server_config,
+        mcp_server_list=agent.mcp_server_list,
         created_at=agent.created_at,
         updated_at=agent.updated_at,
         default_session_id=default_session_id,
@@ -636,3 +636,117 @@ async def _prefetch_first_event(
         return await anext(event_stream)
     except StopAsyncIteration:
         return None
+
+
+@router.post("/{agent_id}/mcp-servers/{server_id}/enable", response_model=McpServerResponse)
+async def enable_mcp_server(
+    agent_id: str,
+    server_id: str,
+    services: ServiceContainer = Depends(get_services),
+) -> McpServerResponse:
+    """为指定 Agent 启用 MCP Server，执行 _setup_mcp 将配置应用到 runtime。"""
+    agent = services.repository.get_agent(agent_id)
+    if agent is None:
+        raise DomainError(
+            code=AGENT_NOT_FOUND,
+            message="Agent was not found.",
+            details={"agent_id": agent_id},
+        )
+    
+    mcp_server = services.repository.get_mcp_server(server_id)
+    if mcp_server is None:
+        raise DomainError(
+            code="MCP_SERVER_NOT_FOUND",
+            message="MCP Server was not found.",
+            details={"server_id": server_id},
+        )
+
+    if agent.status != AgentStatus.running:
+        raise DomainError(
+            code="AGENT_NOT_RUNNING",
+            message="Agent must be running to enable MCP Server.",
+            details={"agent_id": agent_id, "status": agent.status.value},
+        )
+
+    adaptor_client = AdaptorHttpClient(
+        base_url=services.repository.get_sandbox_state(agent_id).adapter_base_url
+    )
+    try:
+        await adaptor_client.post(
+            "/agent/mcp/enable",
+            json={
+                "mcp_server_name": mcp_server.mcp_server_name,
+                "mcp_server_config": mcp_server.mcp_server_config,
+            },
+        )
+    finally:
+        await adaptor_client.close()
+
+    if server_id not in agent.mcp_server_list:
+        updated_list = list(agent.mcp_server_list)
+        updated_list.append(server_id)
+        services.repository.update_agent_mcp_server_list(agent_id, updated_list)
+
+    return McpServerResponse(
+        id=mcp_server.id,
+        mcp_server_name=mcp_server.mcp_server_name,
+        mcp_server_config=mcp_server.mcp_server_config,
+        created_at=mcp_server.created_at,
+        updated_at=mcp_server.updated_at,
+    )
+
+
+@router.post("/{agent_id}/mcp-servers/{server_id}/disable", response_model=McpServerResponse)
+async def disable_mcp_server(
+    agent_id: str,
+    server_id: str,
+    services: ServiceContainer = Depends(get_services),
+) -> McpServerResponse:
+    """为指定 Agent 卸载 MCP Server，执行 openclaw mcp unset 从 runtime 移除配置。"""
+    agent = services.repository.get_agent(agent_id)
+    if agent is None:
+        raise DomainError(
+            code=AGENT_NOT_FOUND,
+            message="Agent was not found.",
+            details={"agent_id": agent_id},
+        )
+    
+    mcp_server = services.repository.get_mcp_server(server_id)
+    if mcp_server is None:
+        raise DomainError(
+            code="MCP_SERVER_NOT_FOUND",
+            message="MCP Server was not found.",
+            details={"server_id": server_id},
+        )
+
+    if agent.status != AgentStatus.running:
+        raise DomainError(
+            code="AGENT_NOT_RUNNING",
+            message="Agent must be running to disable MCP Server.",
+            details={"agent_id": agent_id, "status": agent.status.value},
+        )
+
+    adaptor_client = AdaptorHttpClient(
+        base_url=services.repository.get_sandbox_state(agent_id).adapter_base_url
+    )
+    try:
+        await adaptor_client.post(
+            "/agent/mcp/disable",
+            json={
+                "mcp_server_name": mcp_server.mcp_server_name,
+            },
+        )
+    finally:
+        await adaptor_client.close()
+
+    if server_id in agent.mcp_server_list:
+        updated_list = [id for id in agent.mcp_server_list if id != server_id]
+        services.repository.update_agent_mcp_server_list(agent_id, updated_list)
+
+    return McpServerResponse(
+        id=mcp_server.id,
+        mcp_server_name=mcp_server.mcp_server_name,
+        mcp_server_config=mcp_server.mcp_server_config,
+        created_at=mcp_server.created_at,
+        updated_at=mcp_server.updated_at,
+    )

@@ -271,6 +271,72 @@ def create_agent_router(
             logger.warning("list_agents failed, code=%s", exc.code)
             return _map_agent_error(request=request, exc=exc)
 
+    @router.post("/mcp/enable", response_model=None)
+    async def enable_mcp(
+        request: Request,
+        id: str | None = None,
+    ) -> dict[str, Any] | JSONResponse:
+        """启用 MCP Server，执行 _setup_mcp 将配置应用到 runtime。"""
+        try:
+            body = await request.json()
+            mcp_server_name = body.get("mcp_server_name")
+            mcp_server_config = body.get("mcp_server_config")
+            
+            resolved_agent_id = _resolve_request_agent_id(
+                agent_service=agent_service,
+                agent_id=id,
+            )
+            agent_service.setup_mcp(
+                agent_id=resolved_agent_id,
+                mcp_server_name=mcp_server_name,
+                mcp_server_config=mcp_server_config,
+            )
+            return {"status": "success", "mcp_server_name": mcp_server_name}
+        except AgentServiceError as exc:
+            logger.warning("enable_mcp failed, code=%s", exc.code)
+            return _map_agent_error(request=request, exc=exc)
+        except Exception as exc:
+            logger.exception("enable_mcp unexpected error")
+            return _error_response(
+                request=request,
+                status_code=500,
+                code="INTERNAL_SERVER_ERROR",
+                message="internal server error",
+                details={"reason": str(exc)},
+            )
+
+    @router.post("/mcp/disable", response_model=None)
+    async def disable_mcp(
+        request: Request,
+        id: str | None = None,
+    ) -> dict[str, Any] | JSONResponse:
+        """卸载 MCP Server，执行 openclaw mcp unset 从 runtime 移除配置。"""
+        try:
+            body = await request.json()
+            mcp_server_name = body.get("mcp_server_name")
+            
+            resolved_agent_id = _resolve_request_agent_id(
+                agent_service=agent_service,
+                agent_id=id,
+            )
+            agent_service.unset_mcp(
+                agent_id=resolved_agent_id,
+                mcp_server_name=mcp_server_name,
+            )
+            return {"status": "success", "mcp_server_name": mcp_server_name}
+        except AgentServiceError as exc:
+            logger.warning("disable_mcp failed, code=%s", exc.code)
+            return _map_agent_error(request=request, exc=exc)
+        except Exception as exc:
+            logger.exception("disable_mcp unexpected error")
+            return _error_response(
+                request=request,
+                status_code=500,
+                code="INTERNAL_SERVER_ERROR",
+                message="internal server error",
+                details={"reason": str(exc)},
+            )
+
     return router
 
 

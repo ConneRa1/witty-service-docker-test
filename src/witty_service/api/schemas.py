@@ -27,8 +27,7 @@ class CreateAgentRequest(BaseModel):
     sandbox_id: str | None = None
     has_scheduled_tasks: bool = False
     model_id: str | None = None
-    mcp_server_name: str | None = None
-    mcp_server_config: dict[str, Any] | None = None
+    mcp_server_list: list[str] = Field(default_factory=list)
 
 
 class SendMessageRequest(BaseModel):
@@ -71,8 +70,7 @@ class AgentResponse(BaseModel):
     idle_timeout_seconds: int
     has_scheduled_tasks: bool
     model_id: str | None = None
-    mcp_server_name: str | None = None
-    mcp_server_config: dict[str, Any] | None = None
+    mcp_server_list: list[str] = Field(default_factory=list)
     created_at: UtcDatetime
     updated_at: UtcDatetime
     default_session_id: str | None = None
@@ -131,6 +129,25 @@ class ModelResponse(BaseModel):
     max_tokens: int
     temperature: float
     is_default: bool
+    created_at: UtcDatetime
+    updated_at: UtcDatetime
+
+
+class CreateMcpServerRequest(BaseModel):
+    mcp_server_config: dict[str, Any]
+
+
+class UpdateMcpServerRequest(BaseModel):
+    mcp_server_name: str | None = Field(None, min_length=1)
+    mcp_server_config: dict[str, Any] | None = None
+
+
+class McpServerResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    mcp_server_name: str
+    mcp_server_config: dict[str, Any]
     created_at: UtcDatetime
     updated_at: UtcDatetime
 

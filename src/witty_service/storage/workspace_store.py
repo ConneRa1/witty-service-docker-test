@@ -56,5 +56,5 @@ class WorkspaceStore:
 
 
 class LocalWorkspaceStore(WorkspaceStore):
-    def __init__(self, base_path: str | Path = "~/witty-service/") -> None:
+    def __init__(self, base_path: str | Path = "~/.witty") -> None:
         super().__init__(base_path=base_path)

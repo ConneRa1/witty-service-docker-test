@@ -101,6 +101,25 @@ class OpenClawMcpSetError(OpenClawLifecycleError):
         )
 
 
+class OpenClawMcpUnsetError(OpenClawLifecycleError):
+    def __init__(
+        self,
+        *,
+        command: Sequence[str],
+        returncode: int,
+        stdout: str,
+        stderr: str,
+    ) -> None:
+        super().__init__(
+            action="mcp unset",
+            command=command,
+            returncode=returncode,
+            stdout=stdout,
+            stderr=stderr,
+            message="openclaw mcp unset failed",
+        )
+
+
 class OpenClawOnboardError(OpenClawLifecycleError):
     def __init__(
         self,
@@ -146,6 +165,18 @@ class OpenClawLifecycleService:
         result = self._run_command(command)
         if result.returncode != 0:
             raise OpenClawMcpSetError(
+                command=command,
+                returncode=result.returncode,
+                stdout=result.stdout or "",
+                stderr=result.stderr or "",
+            )
+
+    def mcp_unset(self, name: str) -> None:
+        """卸载 MCP 配置。"""
+        command = ["openclaw", "mcp", "unset", name]
+        result = self._run_command(command)
+        if result.returncode != 0:
+            raise OpenClawMcpUnsetError(
                 command=command,
                 returncode=result.returncode,
                 stdout=result.stdout or "",
@@ -272,6 +303,13 @@ class OpenClawLifecycleService:
             )
         if action == "mcp set":
             return OpenClawMcpSetError(
+                command=command,
+                returncode=returncode,
+                stdout=stdout,
+                stderr=stderr,
+            )
+        if action == "mcp unset":
+            return OpenClawMcpUnsetError(
                 command=command,
                 returncode=returncode,
                 stdout=stdout,

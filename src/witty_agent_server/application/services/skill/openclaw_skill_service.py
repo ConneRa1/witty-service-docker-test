@@ -35,7 +35,7 @@ class OpenClawSkillService(AgentSkillServiceBase):
     ]
 
     _ALLOWED_SOURCE_BASES: list[Path] = [
-        Path(os.getenv("WITTY_WORKSPACE_BASE", "~/witty-service/")).expanduser() / "skill-repositories",
+        Path(os.getenv("WITTY_WORKSPACE_BASE", "~/.witty")).expanduser() / "skill-repositories",
     ]
 
     @classmethod

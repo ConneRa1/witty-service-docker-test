@@ -13,6 +13,7 @@ from witty_service.persistence.orm import (
     AgentORM,
     AgentSkillORM,
     AgentRuntimeStateORM,
+    McpServerORM,
     MessageEventORM,
     MessageORM,
     MessageStatus,
@@ -38,8 +39,7 @@ class AgentRecord:
     idle_timeout_seconds: int
     has_scheduled_tasks: bool
     model_id: str | None
-    mcp_server_name: str | None
-    mcp_server_config: dict[str, Any] | None
+    mcp_server_list: list[str]
     last_active_at: datetime | None
     created_at: datetime
     updated_at: datetime
@@ -56,6 +56,15 @@ class ModelRecord:
     max_tokens: int
     temperature: float
     is_default: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(slots=True)
+class McpServerRecord:
+    id: str
+    mcp_server_name: str
+    mcp_server_config: dict[str, Any]
     created_at: datetime
     updated_at: datetime
 
@@ -251,8 +260,6 @@ class SqliteRepository:
         sandbox_id: str | None = None,
         has_scheduled_tasks: bool = False,
         model_id: str | None = None,
-        mcp_server_name: str | None = None,
-        mcp_server_config: dict[str, Any] | None = None,
         last_active_at: datetime | None = None,
     ) -> AgentRecord:
         return self.create_agent_with_id(
@@ -267,8 +274,6 @@ class SqliteRepository:
             sandbox_id=sandbox_id,
             has_scheduled_tasks=has_scheduled_tasks,
             model_id=model_id,
-            mcp_server_name=mcp_server_name,
-            mcp_server_config=mcp_server_config,
             last_active_at=last_active_at,
         )
 
@@ -286,8 +291,7 @@ class SqliteRepository:
         sandbox_id: str | None = None,
         has_scheduled_tasks: bool = False,
         model_id: str | None = None,
-        mcp_server_name: str | None = None,
-        mcp_server_config: dict[str, Any] | None = None,
+        mcp_server_list: list[str] = [],
         last_active_at: datetime | None = None,
     ) -> AgentRecord:
         with self._session_factory() as session:
@@ -303,8 +307,7 @@ class SqliteRepository:
                 idle_timeout_seconds=idle_timeout_seconds,
                 has_scheduled_tasks=has_scheduled_tasks,
                 model_id=model_id,
-                mcp_server_name=mcp_server_name,
-                mcp_server_config=mcp_server_config,
+                mcp_server_list=mcp_server_list,
                 last_active_at=last_active_at,
             )
             session.add(row)
@@ -379,8 +382,6 @@ class SqliteRepository:
                         "idle_timeout_seconds": agent_row.idle_timeout_seconds,
                         "has_scheduled_tasks": agent_row.has_scheduled_tasks,
                         "model_id": agent_row.model_id,
-                        "mcp_server_name": agent_row.mcp_server_name,
-                        "mcp_server_config": agent_row.mcp_server_config,
                         "created_at": agent_row.created_at,
                         "updated_at": agent_row.updated_at,
                         "conversations": [],
@@ -413,6 +414,20 @@ class SqliteRepository:
             row.status = self._serialize_status(status)
             if updated_at is not None:
                 row.updated_at = updated_at
+            session.commit()
+            session.refresh(row)
+            return self._to_agent_record(row)
+
+    def update_agent_mcp_server_list(
+        self,
+        agent_id: str,
+        mcp_server_list: list[str],
+    ) -> AgentRecord:
+        with self._session_factory() as session:
+            row = session.get(AgentORM, agent_id)
+            if row is None:
+                raise KeyError(f"Agent not found: {agent_id}")
+            row.mcp_server_list = mcp_server_list
             session.commit()
             session.refresh(row)
             return self._to_agent_record(row)
@@ -923,8 +938,7 @@ class SqliteRepository:
             idle_timeout_seconds=row.idle_timeout_seconds,
             has_scheduled_tasks=row.has_scheduled_tasks,
             model_id=row.model_id,
-            mcp_server_name=row.mcp_server_name,
-            mcp_server_config=row.mcp_server_config,
+            mcp_server_list=row.mcp_server_list or [],
             last_active_at=row.last_active_at,
             created_at=row.created_at,
             updated_at=row.updated_at,
@@ -1079,6 +1093,86 @@ class SqliteRepository:
             max_tokens=row.max_tokens,
             temperature=row.temperature,
             is_default=row.is_default,
+            created_at=row.created_at,
+            updated_at=row.updated_at,
+        )
+
+    def create_mcp_server(
+        self,
+        *,
+        mcp_server_name: str,
+        mcp_server_config: dict[str, Any],
+    ) -> McpServerRecord:
+        return self.create_mcp_server_with_id(
+            server_id=str(uuid4()),
+            mcp_server_name=mcp_server_name,
+            mcp_server_config=mcp_server_config,
+        )
+
+    def create_mcp_server_with_id(
+        self,
+        *,
+        server_id: str,
+        mcp_server_name: str,
+        mcp_server_config: dict[str, Any],
+    ) -> McpServerRecord:
+        with self._session_factory() as session:
+            row = McpServerORM(
+                id=server_id,
+                mcp_server_name=mcp_server_name,
+                mcp_server_config=mcp_server_config,
+            )
+            session.add(row)
+            session.commit()
+            session.refresh(row)
+            return self._to_mcp_server_record(row)
+
+    def list_mcp_servers(self) -> list[McpServerRecord]:
+        with self._session_factory() as session:
+            rows = session.query(McpServerORM).order_by(McpServerORM.created_at.asc()).all()
+            return [self._to_mcp_server_record(row) for row in rows]
+
+    def get_mcp_server(self, server_id: str) -> McpServerRecord | None:
+        with self._session_factory() as session:
+            row = session.get(McpServerORM, server_id)
+            if row is None:
+                return None
+            return self._to_mcp_server_record(row)
+
+    def delete_mcp_server(self, server_id: str) -> None:
+        with self._session_factory() as session:
+            row = session.get(McpServerORM, server_id)
+            if row is None:
+                return
+            session.delete(row)
+            session.commit()
+
+    def update_mcp_server(
+        self,
+        server_id: str,
+        *,
+        mcp_server_name: str | None = None,
+        mcp_server_config: dict[str, Any] | None = None,
+    ) -> McpServerRecord:
+        with self._session_factory() as session:
+            row = session.get(McpServerORM, server_id)
+            if row is None:
+                raise KeyError(f"MCP Server not found: {server_id}")
+            if mcp_server_name is not None:
+                row.mcp_server_name = mcp_server_name
+            if mcp_server_config is not None:
+                row.mcp_server_config = mcp_server_config
+            row.updated_at = datetime.now(timezone.utc)
+            session.commit()
+            session.refresh(row)
+            return self._to_mcp_server_record(row)
+
+    @staticmethod
+    def _to_mcp_server_record(row: McpServerORM) -> McpServerRecord:
+        return McpServerRecord(
+            id=row.id,
+            mcp_server_name=row.mcp_server_name,
+            mcp_server_config=row.mcp_server_config,
             created_at=row.created_at,
             updated_at=row.updated_at,
         )

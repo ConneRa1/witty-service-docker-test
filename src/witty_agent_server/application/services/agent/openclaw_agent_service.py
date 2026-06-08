@@ -98,10 +98,6 @@ class OpenClawAgentService(AgentServiceBase):
             model_provider = config.get("model", {}).get("provider", "") if config else ""
             api_key = config.get("model", {}).get("api_key", "") if config else ""
 
-            self._setup_mcp(
-                mcp_server_name=config.get("mcp_server_name") if config else None,
-                mcp_server_config=config.get("mcp_server_config") if config else None,
-            )
             self._onboard_openclaw(model_provider=model_provider, api_key=api_key)
 
             resolved_agent_id, configured_agent = self._resolve_target_agent(
@@ -128,6 +124,39 @@ class OpenClawAgentService(AgentServiceBase):
                 self._lifecycle_service.mcp_set(mcp_server_name, mcp_server_config)
             except OpenClawLifecycleError as exc:
                 logger.warning("MCP setup failed, continuing: %s", exc)
+
+    def _unset_mcp(self, mcp_server_name: str | None) -> None:
+        """卸载 MCP 配置。"""
+        
+        if mcp_server_name:
+            logger.info("Unsetting MCP: name=%s", mcp_server_name)
+            try:
+                self._lifecycle_service.mcp_unset(mcp_server_name)
+            except OpenClawLifecycleError as exc:
+                logger.warning("MCP unset failed, continuing: %s", exc)
+
+    def setup_mcp(
+        self,
+        *,
+        agent_id: str | None = None,
+        mcp_server_name: str | None = None,
+        mcp_server_config: dict[str, Any] | None = None,
+    ) -> None:
+        """设置 MCP 配置。"""
+        with self._lock:
+            self._ensure_agent_context(agent_id=agent_id)
+            self._setup_mcp(mcp_server_name, mcp_server_config)
+
+    def unset_mcp(
+        self,
+        *,
+        agent_id: str | None = None,
+        mcp_server_name: str | None = None,
+    ) -> None:
+        """卸载 MCP 配置。"""
+        with self._lock:
+            self._ensure_agent_context(agent_id=agent_id)
+            self._unset_mcp(mcp_server_name)
 
     def _onboard_openclaw(self, *, model_provider: str, api_key: str) -> None:
         """使用 onboard 命令启动 openclaw runtime。"""

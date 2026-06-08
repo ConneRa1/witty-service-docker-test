@@ -55,8 +55,7 @@ class AgentORM(Base):
     idle_timeout_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
     has_scheduled_tasks: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     model_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
-    mcp_server_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    mcp_server_config: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    mcp_server_list: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
     last_active_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
         nullable=True,
@@ -343,4 +342,23 @@ class AgentSkillORM(Base):
         DateTime(timezone=True),
         nullable=False,
         default=utcnow,
+    )
+
+
+class McpServerORM(Base):
+    __tablename__ = 'mcp_servers'
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    mcp_server_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    mcp_server_config: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=utcnow,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=utcnow,
+        onupdate=utcnow,
     )

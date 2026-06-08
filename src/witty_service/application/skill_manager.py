@@ -42,7 +42,7 @@ class SkillManager:
     repository: SqliteRepository
 
     def __post_init__(self) -> None:
-        workspace_base = Path(os.getenv('WITTY_WORKSPACE_BASE', '~/witty-service/')).expanduser()
+        workspace_base = Path(os.getenv('WITTY_WORKSPACE_BASE', '~/.witty')).expanduser()
         self._skill_archives_dir = workspace_base / 'skill-repositories'
         self._skill_archives_dir.mkdir(parents=True, exist_ok=True)
 

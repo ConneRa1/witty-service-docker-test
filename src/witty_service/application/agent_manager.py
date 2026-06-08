@@ -6,7 +6,7 @@ import httpx
 import logging
 import time
 from datetime import datetime
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Protocol
 from uuid import NAMESPACE_URL, uuid4, uuid5
@@ -71,8 +71,7 @@ class AgentCreateRequest:
     sandbox_id: str | None = None
     has_scheduled_tasks: bool = False
     model_id: str | None = None
-    mcp_server_name: str | None = None
-    mcp_server_config: dict[str, Any] | None = None
+    mcp_server_list: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True, frozen=True)
@@ -100,8 +99,7 @@ class AgentRepository(Protocol):
         sandbox_id: str | None = None,
         has_scheduled_tasks: bool = False,
         model_id: str | None = None,
-        mcp_server_name: str | None = None,
-        mcp_server_config: dict[str, Any] | None = None,
+        mcp_server_list: list[str] = [],
         last_active_at: Any | None = None,
     ) -> AgentRecord: ...
 
@@ -657,8 +655,6 @@ class AgentManager:
         return {
             "model_id": request.model_id,
             "model": model_info,
-            "mcp_server_name": request.mcp_server_name,
-            "mcp_server_config": request.mcp_server_config,
         }
 
     def pause_agent(self, agent_id: str) -> AgentRecord:
@@ -682,22 +678,20 @@ class AgentManager:
         return self._repository.update_agent_status(agent_id, AgentStatus.paused)
 
     async def _resume_from_deleted(self, agent_id: str) -> AgentRecord:
-        """从 deleted 状态恢复"""
+        """从 deleted 状态恢复（备份功能暂禁用）"""
         agent = self._get_agent(agent_id)
 
-        # 1. 检查备份
-        backup_store = RuntimeBackupStore()
-        if not backup_store.backup_exists(agent_id, agent.adapter_type):
-            raise DomainError(
-                code=RUNTIME_BACKUP_NOT_FOUND,
-                message="Runtime backup not found.",
-                details={"agent_id": agent_id},
-            )
+        # 1. 检查备份（暂注释，备份功能已禁用）
+        # backup_store = RuntimeBackupStore()
+        # if not backup_store.backup_exists(agent_id, agent.adapter_type):
+        #     raise DomainError(
+        #         code=RUNTIME_BACKUP_NOT_FOUND,
+        #         message="Runtime backup not found.",
+        #         details={"agent_id": agent_id},
+        #     )
+        # backup_store.restore(agent_id, agent.adapter_type)
 
-        # 2. 恢复运行时备份
-        backup_store.restore(agent_id, agent.adapter_type)
-
-        # 3. 重新启动沙箱
+        # 2. 重新启动沙箱（不依赖备份）
         sandbox_handle = self._sandbox_backend.start(
             agent_id=agent_id,
             workspace_path=agent.workspace_path,
@@ -1298,13 +1292,13 @@ class AgentManager:
 
         cleanup_errors: list[dict[str, str]] = []
 
-        # 1. 备份运行时
-        if sandbox_state is not None:
-            self._collect_error(
-                cleanup_errors,
-                "runtime_backup",
-                lambda: self._backup_runtime(agent_id, agent.adapter_type),
-            )
+        # 1. 备份运行时（暂注释，避免占用空间）
+        # if sandbox_state is not None:
+        #     self._collect_error(
+        #         cleanup_errors,
+        #         "runtime_backup",
+        #         lambda: self._backup_runtime(agent_id, agent.adapter_type),
+        #     )
 
         # 2. 停止运行时
         if agent.status in {AgentStatus.running, AgentStatus.paused}:
@@ -1377,8 +1371,7 @@ class AgentManager:
             sandbox_id=request.sandbox_id,
             has_scheduled_tasks=request.has_scheduled_tasks,
             model_id=request.model_id,
-            mcp_server_name=request.mcp_server_name,
-            mcp_server_config=request.mcp_server_config,
+            mcp_server_list=request.mcp_server_list,
         )
 
     def _maybe_prepend_interruption_prefix(self, session_id: str, content: str) -> str:

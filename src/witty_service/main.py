@@ -9,6 +9,7 @@ from witty_service.api.cve import router as cve_router
 from witty_service.api.backport import router as backport_router
 from witty_service.api.errors import register_exception_handlers
 from witty_service.api.models import router as models_router
+from witty_service.api.mcp_servers import router as mcp_servers_router
 from witty_service.api.services import ServiceContainer, build_default_services
 from witty_service.api.skills import router as skills_router
 from witty_service.application.skill_manager import SkillManager
@@ -94,6 +95,7 @@ def create_app(*, services: ServiceContainer | None = None) -> FastAPI:
     app.include_router(agents_router)
     app.include_router(cve_router)
     app.include_router(models_router)
+    app.include_router(mcp_servers_router)
     app.include_router(skills_router)
     app.include_router(backport_router)
 
