@@ -15,14 +15,6 @@ from witty_service.application.backport_git_client import BackportGitClient
 
 class BackportCvekitClient:
     REFRESH_META_SCHEMA_VERSION = 1
-    STATIC_COMMIT_KEYS = {
-        "commit",
-        "input_commit",
-        "commit_title",
-        "committed_datetime",
-        "git_describe",
-        "target_branch",
-    }
     PATCH_KIND_TO_KEY = {
         "original": "original_patch_path",
         "current": "patch_path",
@@ -313,13 +305,7 @@ class BackportCvekitClient:
         searched = ", ".join(str(path) for path in candidate_paths) or "<empty>"
         raise ValueError(f"report 中找不到 row_id={target_row_id}，searched={searched}")
 
-    # ── 用 target 仓 git 历史和本地 patch 检查刷新状态 ─────────
-
-    @staticmethod
-    def _patch_check_error(result: dict[str, str]) -> str:
-        stderr = str(result.get("stderr") or "").strip()
-        stdout = str(result.get("stdout") or "").strip()
-        return stderr or stdout or "git apply --check failed"
+    # ── report 对齐和元信息 ───────────────────────────────────
 
     def _mark_merged_by_subject(
         self,
@@ -362,22 +348,6 @@ class BackportCvekitClient:
         self._mark_merged_by_subject(report_data, subject_map)
         return report_data
 
-    @staticmethod
-    def _refresh_meta(report_data: dict[str, Any]) -> dict[str, Any]:
-        meta = report_data.get("refresh_meta")
-        return meta if isinstance(meta, dict) else {}
-
-    def _has_unchanged_target(self, report_data: dict[str, Any], target_state: dict[str, Any]) -> bool:
-        meta = self._refresh_meta(report_data)
-        return (
-            meta.get("schema_version") == self.REFRESH_META_SCHEMA_VERSION
-            and meta.get("target_path") == target_state.get("target_path")
-            and meta.get("target_branch") == target_state.get("target_branch")
-            and meta.get("target_head_checked") == target_state.get("target_head")
-            and meta.get("target_status_clean") is True
-            and target_state.get("target_status_clean") is True
-        )
-
     def _write_refresh_meta(
         self,
         report_data: dict[str, Any],
@@ -405,221 +375,77 @@ class BackportCvekitClient:
         return report_data
 
     @staticmethod
-    def _subject_map_from_commits(commits: list[dict[str, str]]) -> dict[str, str]:
-        subject_map: dict[str, str] = {}
-        for item in commits:
-            subject = str(item.get("subject") or "").strip()
-            commit_hash = str(item.get("hash") or "").strip()
-            if subject and commit_hash and subject not in subject_map:
-                subject_map[subject] = commit_hash
-        return subject_map
+    def _is_skipped_row(row: dict[str, Any]) -> bool:
+        status = str(row.get("status") or "").strip().lower()
+        merged = str(row.get("merged_in_target") or "").strip().lower()
+        return status == "skipped" or merged == "skipped" or row.get("is_merge_commit") is True
 
-    def _collect_refresh_subjects(
-        self,
-        report_data: dict[str, Any],
-        target_path: str,
-        target_state: dict[str, Any],
-    ) -> tuple[dict[str, str], str]:
-        meta = self._refresh_meta(report_data)
-        old_head = str(meta.get("target_head_checked") or "").strip()
-        new_head = str(target_state.get("target_head") or "").strip()
-        if (
-            old_head
-            and new_head
-            and old_head != new_head
-            and meta.get("target_path") == target_state.get("target_path")
-            and meta.get("target_branch") == target_state.get("target_branch")
-        ):
-            recent_commits = BackportGitClient.list_commits_between(target_path, old_head, new_head)
-            subject_map = self._subject_map_from_commits(recent_commits)
-            if subject_map:
-                return subject_map, "head-range"
-
-        return BackportGitClient.collect_subject_map(target_path), "recent-log"
+    @classmethod
+    def _is_blocking_conflict(cls, row: dict[str, Any]) -> bool:
+        return row.get("has_conflict") is True and not cls._is_skipped_row(row)
 
     @staticmethod
-    def _find_merged_prefix_len(commits: list[dict[str, Any]]) -> int:
-        prefix_len = 0
-        for item in commits:
-            if item.get("merged_in_target") is True:
-                prefix_len += 1
-                continue
-            break
-        return prefix_len
+    def _is_pending_row(row: dict[str, Any]) -> bool:
+        return str(row.get("status") or "").strip().lower() == "pending"
 
-    def _apply_local_patch_checks(
+    @staticmethod
+    def _write_report_config(path: Path, report_data: dict[str, Any], commits: list[dict[str, Any]]) -> None:
+        config_data = {key: value for key, value in report_data.items() if key != "commits"}
+        config_data.pop("api_key", None)
+        config_data["commits"] = commits
+        with path.open("w", encoding="utf-8") as handle:
+            yaml.safe_dump(config_data, handle, allow_unicode=True, sort_keys=False)
+
+    def _run_stop_at_first_conflict_report(
         self,
         *,
-        rows_to_check: list[dict[str, Any]],
-        target_path: str,
-    ) -> None:
-        for item in rows_to_check:
-            if item.get("merged_in_target") is True:
-                continue
-
-            patch_path = str(item.get("original_patch_path") or "").strip()
-            if not patch_path:
-                raise ValueError(f"commit 缺少 original_patch_path: {self._build_row_id(item)}")
-
-            try:
-                reverse_result = BackportGitClient.check_patch_file(
-                    target_path,
-                    patch_path,
-                    reverse=True,
-                )
-                if reverse_result.get("returncode") == "0":
-                    item["merged_in_target"] = True
-                    item["merged_check_error"] = None
-                    item["has_conflict"] = False
-                    item["conflict_check_method"] = "patch-reverse-check"
-                    item["conflict_check_error"] = None
-                    item["status"] = "success"
-                    item["error"] = None
-                    continue
-
-                apply_result = BackportGitClient.check_patch_file(target_path, patch_path)
-            except (FileNotFoundError, NotADirectoryError) as error:
-                raise ValueError(str(error)) from error
-
-            item["merged_in_target"] = False
-            if apply_result.get("returncode") == "0":
-                item["has_conflict"] = False
-                item["conflict_check_method"] = "fast-apply"
-                item["conflict_check_error"] = None
-                item["status"] = "success"
-                item["error"] = None
-                if not str(item.get("patch_path") or "").strip():
-                    item["patch_path"] = patch_path
-            else:
-                item["has_conflict"] = True
-                item["conflict_check_method"] = "fast-apply"
-                item["conflict_check_error"] = self._patch_check_error(apply_result)
-
-    def _refresh_report_locally(
-        self,
-        report_data: dict[str, Any],
-        target_path: str,
-        target_state: dict[str, Any],
-    ) -> tuple[dict[str, Any], str, int, int]:
-        commits_raw = report_data.get("commits")
-        if not isinstance(commits_raw, list) or not commits_raw:
-            raise ValueError("report 中没有合法 commits")
-        commits = [item for item in commits_raw if isinstance(item, dict)]
-        if len(commits) != len(commits_raw):
-            raise ValueError("report commits 结构不兼容")
-
-        subject_map, subject_source = self._collect_refresh_subjects(
-            report_data,
-            target_path,
-            target_state,
-        )
-        self._mark_merged_by_subject(report_data, subject_map)
-
-        prefix_len = self._find_merged_prefix_len(commits)
-        suffix = commits[prefix_len:]
-        rows_to_check = [item for item in suffix if item.get("merged_in_target") is not True]
-        mode = f"local-{subject_source}"
-
-        self._apply_local_patch_checks(
-            rows_to_check=rows_to_check,
-            target_path=target_path,
-        )
-        report_data["commits"] = commits
-        skipped_count = len(commits) - len(rows_to_check)
-        self._write_refresh_meta(
-            report_data,
-            target_state,
-            mode=mode,
-            checked_count=len(rows_to_check),
-            skipped_count=skipped_count,
-        )
-        return report_data, mode, len(rows_to_check), skipped_count
-
-    def _refresh_report_with_cvekit(
-        self,
-        *,
-        base_path: Path,
         report_data: dict[str, Any],
         commits: list[dict[str, Any]],
-        target_path: str,
-        fallback_reason: str,
-    ) -> dict[str, Any]:
+        run_prefix: str,
+    ) -> tuple[Path, dict[str, Any], list[dict[str, Any]]]:
         env = self._build_env()
-
         self._runs_root.mkdir(parents=True, exist_ok=True)
         run_dir = Path(
             tempfile.mkdtemp(
-                prefix=f"refresh_{int(time.time())}_",
+                prefix=f"{run_prefix}_{int(time.time())}_",
                 dir=str(self._runs_root),
             )
         )
-        raw_config_path = run_dir / "refresh-backport-batch.yml"
-        refreshed_path = run_dir / "refresh-backport-batch.yml.report.yml"
-
-        raw_config = {key: value for key, value in report_data.items() if key not in {"commits", "refresh_meta"}}
-        raw_config.pop("api_key", None)
-        raw_config["commits"] = [
-            item for item in (self._normalize_commit_item(commit) for commit in commits) if item
-        ]
-        with raw_config_path.open("w", encoding="utf-8") as handle:
-            yaml.safe_dump(raw_config, handle, allow_unicode=True, sort_keys=False)
+        report_config_path = run_dir / f"{run_prefix}.report.yml"
+        self._write_report_config(report_config_path, report_data, commits)
 
         self._run_cvekit(
-            ["--action", "backport-batch",
-             "--backport-config", str(raw_config_path), "--debug", "--json"],
-            env, run_dir,
+            [
+                "--action", "backport-batch",
+                "--backport-config", str(report_config_path),
+                "--debug", "--json",
+                "--stop-at-first-conflict",
+            ],
+            env,
+            run_dir,
         )
+        updated_report_data, updated_commits = self._read_report(report_config_path)
+        return run_dir, updated_report_data, updated_commits
 
-        if not refreshed_path.exists():
-            raise RuntimeError(f"cvekit 执行后未生成刷新报告文件: {refreshed_path}")
-
-        report_data, commits = self._read_report(refreshed_path)
-        reconcile_target = str(report_data.get("target_path") or target_path or "")
-        if reconcile_target:
-            report_data = self._reconcile_report(report_data, reconcile_target)
-            try:
-                target_state = BackportGitClient.get_repo_state(reconcile_target)
-                self._write_refresh_meta(
-                    report_data,
-                    target_state,
-                    mode="cvekit-fallback",
-                    checked_count=len(commits),
-                    skipped_count=0,
-                    fallback_reason=fallback_reason,
-                )
-            except (FileNotFoundError, NotADirectoryError, RuntimeError):
-                pass
-        with base_path.open("w", encoding="utf-8") as handle:
-            yaml.safe_dump(report_data, handle, allow_unicode=True, sort_keys=False)
-
-        _, commits = self._read_report(base_path)
-        return {
-            "operation": "refresh_report",
-            "status": "success",
-            "stage": "interactive_editing",
-            "summary": f"已刷新当前 report 状态，共 {len(commits)} 条 commit",
-            "artifacts": {
-                "base_report_path": str(base_path),
-                "run_dir": str(run_dir),
-                "refresh_mode": "cvekit-fallback",
-                "fallback_reason": fallback_reason,
-            },
-            "report": {
-                "report_path": str(base_path),
-                "commit_count": len(commits),
-                "commits": commits,
-            },
-        }
+    @classmethod
+    def _merge_report_rows(
+        cls,
+        commits: list[dict[str, Any]],
+        updated_rows: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        updates = {cls._build_row_id(row): row for row in updated_rows if isinstance(row, dict)}
+        return [
+            updates.get(cls._build_row_id(row), row)
+            for row in commits
+            if isinstance(row, dict)
+        ]
 
     @staticmethod
-    def _normalize_commit_item(item: object) -> dict[str, Any]:
-        if not isinstance(item, dict):
-            return {}
-        return {
-            key: item[key]
-            for key in BackportCvekitClient.STATIC_COMMIT_KEYS
-            if item.get(key) is not None
-        }
+    def _write_report(path: Path, report_data: dict[str, Any], commits: list[dict[str, Any]]) -> None:
+        next_report = dict(report_data)
+        next_report["commits"] = commits
+        with path.open("w", encoding="utf-8") as handle:
+            yaml.safe_dump(next_report, handle, allow_unicode=True, sort_keys=False)
 
     @staticmethod
     def _filtered_report_path(base_path: Path) -> Path:
@@ -716,7 +542,8 @@ class BackportCvekitClient:
         self._run_cvekit(
             ["--action", "backport-batch",
             "--backport-config", str(config_path),
-            "--debug", "--json"],
+            "--debug", "--json",
+            "--stop-at-first-conflict"],
             env, run_dir,
         )
 
@@ -756,12 +583,9 @@ class BackportCvekitClient:
             },
         }
 
-    # ── 刷新报告 ────────────────────────────────────────────────
-
-    def refresh_report(
+    def continue_report(
         self,
         base_report_path: str,
-        target_path: str,
     ) -> dict[str, Any]:
         base_path = Path(base_report_path).expanduser().resolve()
         if not base_path.exists():
@@ -769,58 +593,19 @@ class BackportCvekitClient:
 
         report_data, commits = self._read_report(base_path)
         if not commits:
-            raise RuntimeError(f"report 中没有可刷新的 commits: {base_path}")
+            raise RuntimeError(f"report 中没有可继续检查的 commits: {base_path}")
 
-        reconcile_target = str(report_data.get("target_path") or target_path or "")
-        if not reconcile_target:
-            return self._refresh_report_with_cvekit(
-                base_path=base_path,
-                report_data=report_data,
-                commits=commits,
-                target_path=target_path,
-                fallback_reason="missing target_path",
-            )
-
-        try:
-            target_state = BackportGitClient.get_repo_state(reconcile_target)
-        except (FileNotFoundError, NotADirectoryError, RuntimeError) as error:
-            return self._refresh_report_with_cvekit(
-                base_path=base_path,
-                report_data=report_data,
-                commits=commits,
-                target_path=target_path,
-                fallback_reason=str(error),
-            )
-
-        meta = self._refresh_meta(report_data)
-        if meta.get("schema_version") == self.REFRESH_META_SCHEMA_VERSION:
-            if meta.get("target_path") and meta.get("target_path") != target_state.get("target_path"):
-                return self._refresh_report_with_cvekit(
-                    base_path=base_path,
-                    report_data=report_data,
-                    commits=commits,
-                    target_path=target_path,
-                    fallback_reason="target_path changed",
-                )
-            if meta.get("target_branch") and meta.get("target_branch") != target_state.get("target_branch"):
-                return self._refresh_report_with_cvekit(
-                    base_path=base_path,
-                    report_data=report_data,
-                    commits=commits,
-                    target_path=target_path,
-                    fallback_reason="target_branch changed",
-                )
-
-        if self._has_unchanged_target(report_data, target_state):
+        blocking_conflict = next(
+            (row for row in commits if isinstance(row, dict) and self._is_blocking_conflict(row)),
+            None,
+        )
+        if blocking_conflict is not None:
             return {
-                "operation": "refresh_report",
-                "status": "success",
+                "operation": "continue_report",
+                "status": "failed",
                 "stage": "interactive_editing",
-                "summary": f"目标仓无变化，直接复用当前 report，共 {len(commits)} 条 commit",
-                "artifacts": {
-                    "base_report_path": str(base_path),
-                    "refresh_mode": "no-change",
-                },
+                "summary": "当前仍有阻塞冲突，请先检测或处理当前冲突后再继续检查。",
+                "artifacts": {"base_report_path": str(base_path)},
                 "report": {
                     "report_path": str(base_path),
                     "commit_count": len(commits),
@@ -828,40 +613,124 @@ class BackportCvekitClient:
                 },
             }
 
-        try:
-            report_data, mode, checked_count, skipped_count = self._refresh_report_locally(
-                report_data,
-                reconcile_target,
-                target_state,
-            )
-        except ValueError as error:
-            return self._refresh_report_with_cvekit(
-                base_path=base_path,
-                report_data=report_data,
-                commits=commits,
-                target_path=target_path,
-                fallback_reason=str(error),
-            )
+        first_pending_index = next(
+            (idx for idx, row in enumerate(commits) if isinstance(row, dict) and self._is_pending_row(row)),
+            None,
+        )
+        if first_pending_index is None:
+            return {
+                "operation": "continue_report",
+                "status": "success",
+                "stage": "interactive_editing",
+                "summary": "当前 report 没有待检查的 pending 条目。",
+                "artifacts": {"base_report_path": str(base_path)},
+                "report": {
+                    "report_path": str(base_path),
+                    "commit_count": len(commits),
+                    "commits": commits,
+                },
+            }
 
-        with base_path.open("w", encoding="utf-8") as handle:
-            yaml.safe_dump(report_data, handle, allow_unicode=True, sort_keys=False)
-        _, commits = self._read_report(base_path)
-
+        run_dir, _, updated_commits = self._run_stop_at_first_conflict_report(
+            report_data=report_data,
+            commits=commits,
+            run_prefix="continue-backport-batch",
+        )
+        self._write_report(base_path, report_data, updated_commits)
+        _, persisted_commits = self._read_report(base_path)
         return {
-            "operation": "refresh_report",
+            "operation": "continue_report",
             "status": "success",
             "stage": "interactive_editing",
-            "summary": f"已快速刷新当前 report，检查 {checked_count} 条，跳过 {skipped_count} 条",
+            "summary": f"继续检查完成，从第 {first_pending_index + 1} 条 pending 开始推进。",
             "artifacts": {
                 "base_report_path": str(base_path),
-                "refresh_mode": mode,
-                "checked_count": checked_count,
-                "skipped_count": skipped_count,
+                "run_dir": str(run_dir),
             },
             "report": {
                 "report_path": str(base_path),
-                "commit_count": len(commits),
-                "commits": commits,
+                "commit_count": len(persisted_commits),
+                "commits": persisted_commits,
+            },
+        }
+
+    def recheck_conflict(
+        self,
+        base_report_path: str,
+        row: dict[str, Any],
+        working_report_path: str | None = None,
+    ) -> dict[str, Any]:
+        base_path = Path(base_report_path).expanduser().resolve()
+        if not base_path.exists():
+            raise FileNotFoundError(f"base_report_path 不存在: {base_path}")
+
+        report_data, commits = self._read_report(base_path)
+        first_conflict = next(
+            (item for item in commits if isinstance(item, dict) and self._is_blocking_conflict(item)),
+            None,
+        )
+        if first_conflict is None:
+            return {
+                "operation": "recheck_conflict",
+                "status": "failed",
+                "stage": "interactive_editing",
+                "summary": "当前 report 没有可检测的阻塞冲突。",
+                "artifacts": {"base_report_path": str(base_path)},
+                "report": {"commit_count": 0, "commits": []},
+            }
+
+        resolved_row = self._resolve_commit_row(
+            row=row,
+            base_report_path=base_report_path,
+            working_report_path=working_report_path,
+        )
+        target_row_id = self._build_row_id(resolved_row)
+        if self._build_row_id(first_conflict) != target_row_id:
+            return {
+                "operation": "recheck_conflict",
+                "status": "failed",
+                "stage": "interactive_editing",
+                "summary": "只能检测当前第一条阻塞冲突。",
+                "artifacts": {"base_report_path": str(base_path)},
+                "report": {"commit_count": 1, "commits": [first_conflict]},
+            }
+
+        row_for_check = dict(resolved_row)
+        original_patch_path = str(
+            row_for_check.get("original_patch_path") or row_for_check.get("patch_path") or ""
+        ).strip()
+        row_for_check["status"] = "pending"
+        row_for_check["merged_in_target"] = None
+        row_for_check["merged_check_error"] = None
+        row_for_check["has_conflict"] = None
+        row_for_check["conflict_check_method"] = None
+        row_for_check["conflict_check_error"] = None
+        row_for_check["backported_patch_path"] = None
+        if original_patch_path:
+            row_for_check["original_patch_path"] = original_patch_path
+            row_for_check["patch_path"] = original_patch_path
+
+        run_dir, _, updated_rows = self._run_stop_at_first_conflict_report(
+            report_data=report_data,
+            commits=[row_for_check],
+            run_prefix="recheck-backport-conflict",
+        )
+        updated_row = updated_rows[0] if updated_rows else row_for_check
+        next_commits = self._merge_report_rows(commits, [updated_row])
+        self._write_report(base_path, report_data, next_commits)
+        return {
+            "operation": "recheck_conflict",
+            "status": "success",
+            "stage": "interactive_editing",
+            "summary": "当前冲突已重新检测。",
+            "artifacts": {
+                "base_report_path": str(base_path),
+                "run_dir": str(run_dir),
+            },
+            "report": {
+                "report_path": str(base_path),
+                "commit_count": 1,
+                "commits": [updated_row],
             },
         }
 
@@ -972,6 +841,120 @@ class BackportCvekitClient:
             "diagnostics": {
                 "likely_missing_prerequisite": self._infer_likely_missing_prerequisite(combined_output),
             },
+        }
+
+    @staticmethod
+    def _normalize_try_resolve_row(row: dict[str, Any]) -> dict[str, Any]:
+        updated = dict(row)
+        backported_patch_path = str(updated.get("backported_patch_path") or "").strip()
+        applied_commit = str(updated.get("applied_commit") or "").strip()
+        status = str(updated.get("status") or "").strip().lower()
+        if status == "success" and applied_commit:
+            updated["has_conflict"] = False
+            updated["merged_in_target"] = True
+            updated["conflict_check_error"] = None
+            updated["error"] = None
+            return updated
+        if status == "success" and backported_patch_path and not applied_commit:
+            updated["has_conflict"] = False
+            updated["conflict_check_method"] = "backport-generated"
+            updated["conflict_check_error"] = None
+            updated["error"] = None
+            updated["patch_path"] = backported_patch_path
+        return updated
+
+    def try_resolve(
+        self,
+        base_report_path: str,
+        row: dict[str, Any],
+        target_path: str,
+        patch_dataset_dir: str,
+        signer_name: str,
+        signer_email: str,
+        commit_message_template: str,
+        commit_message_source: str,
+        linux_repo_path: str,
+        working_report_path: str | None = None,
+    ) -> dict[str, Any]:
+        base_path = Path(base_report_path).expanduser().resolve()
+        if not base_path.exists():
+            raise FileNotFoundError(f"base_report_path 不存在: {base_path}")
+
+        _, base_commits = self._read_report(base_path)
+        first_conflict = next(
+            (item for item in base_commits if isinstance(item, dict) and self._is_blocking_conflict(item)),
+            None,
+        )
+        if first_conflict is None:
+            return {
+                "operation": "try_resolve",
+                "status": "failed",
+                "stage": "interactive_editing",
+                "summary": "当前 report 没有可处理的阻塞冲突。",
+                "artifacts": {"base_report_path": str(base_path)},
+                "report": {"commit_count": 0, "commits": []},
+                "diagnostics": {},
+            }
+
+        resolved_row = self._resolve_commit_row(
+            row=row,
+            base_report_path=base_report_path,
+            working_report_path=working_report_path,
+        )
+        if self._build_row_id(first_conflict) != self._build_row_id(resolved_row):
+            return {
+                "operation": "try_resolve",
+                "status": "failed",
+                "stage": "interactive_editing",
+                "summary": "只能处理当前第一条阻塞冲突。",
+                "artifacts": {"base_report_path": str(base_path)},
+                "report": {"commit_count": 1, "commits": [first_conflict]},
+                "diagnostics": {},
+            }
+
+        result = self.execute_selected(
+            base_report_path=base_report_path,
+            selected_commits=[resolved_row],
+            target_path=target_path,
+            patch_dataset_dir=patch_dataset_dir,
+            signer_name=signer_name,
+            signer_email=signer_email,
+            commit_message_template=commit_message_template,
+            commit_message_source=commit_message_source,
+            linux_repo_path=linux_repo_path,
+            working_report_path=working_report_path,
+        )
+        affected_rows = [
+            self._normalize_try_resolve_row(item)
+            for item in result.get("report", {}).get("commits", [])
+            if isinstance(item, dict)
+        ]
+        if affected_rows:
+            report_data, commits = self._read_report(base_path)
+            next_commits = self._merge_report_rows(commits, affected_rows)
+            self._write_report(base_path, report_data, next_commits)
+            _, persisted_commits = self._read_report(base_path)
+            affected_ids = {self._build_row_id(row) for row in affected_rows}
+            affected_rows = [
+                item
+                for item in persisted_commits
+                if self._build_row_id(item) in affected_ids
+            ]
+
+        artifacts = dict(result.get("artifacts") or {})
+        artifacts["base_report_path"] = str(base_path)
+        return {
+            "operation": "try_resolve",
+            "status": result.get("status") or "success",
+            "stage": "interactive_editing",
+            "summary": result.get("summary") or "冲突处理完成",
+            "artifacts": artifacts,
+            "report": {
+                "report_path": str(base_path),
+                "commit_count": len(affected_rows),
+                "commits": affected_rows,
+            },
+            "diagnostics": result.get("diagnostics") or {},
         }
 
     # ── 单条 apply ─────────────────────────────────────────────

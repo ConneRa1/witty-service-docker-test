@@ -177,13 +177,15 @@ class BackportService:
     def _build_handlers(self) -> dict[str, Callable[[dict[str, Any]], dict[str, Any]]]:
         return {
             "generate_report": self._run_generate_report,
-            "refresh_report": self._run_refresh_report,
+            "continue_report": self._run_continue_report,
+            "recheck_conflict": self._run_recheck_conflict,
             "load_git_log": self._run_load_git_log,
             "load_git_show": self._run_load_git_show,
             "load_patch_preview": self._run_load_patch_preview,
             "preview_commit_message": self._run_preview_commit_message,
             "execute_selected": self._run_execute_selected,
             "apply_row": self._run_apply_row,
+            "try_resolve": self._run_try_resolve,
             "check_manual_patch": self._run_check_manual_patch,
             "apply_manual_patch": self._run_apply_manual_patch,
         }
@@ -227,24 +229,53 @@ class BackportService:
                 "diagnostics": {"error_text": str(error)},
             }
 
-    def _run_refresh_report(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def _run_continue_report(self, payload: dict[str, Any]) -> dict[str, Any]:
         config = self._extract_config(payload)
         base_report_path = self._get_string(payload, "base_report_path", "baseReportPath") or config["current_report_path"]
         if not base_report_path:
             raise DomainError(
                 code="BACKPORT_ARGUMENT_REQUIRED",
-                message="Missing required argument for refresh_report.",
-                details={"action": "refresh_report", "keys": ["base_report_path", "baseReportPath"]},
+                message="Missing required argument for continue_report.",
+                details={"action": "continue_report", "keys": ["base_report_path", "baseReportPath"]},
             )
         try:
-            return self._cvekit_client.refresh_report(
-                base_report_path=base_report_path,
-                target_path=config["target_path"],
-            )
-        except (RuntimeError, FileNotFoundError) as error:
-            logger.exception("refresh_report failed")
+            return self._cvekit_client.continue_report(base_report_path=base_report_path)
+        except (RuntimeError, FileNotFoundError, ValueError) as error:
+            logger.exception("continue_report failed")
             return {
-                "operation": "refresh_report",
+                "operation": "continue_report",
+                "status": "failed",
+                "summary": str(error),
+                "diagnostics": {"error_text": str(error)},
+            }
+
+    def _run_recheck_conflict(self, payload: dict[str, Any]) -> dict[str, Any]:
+        config = self._extract_config(payload)
+        base_report_path = self._get_string(payload, "base_report_path", "baseReportPath") or config["current_report_path"]
+        working_report_path = self._get_string(payload, "working_report_path", "workingReportPath")
+        row = payload.get("row")
+        if not base_report_path:
+            raise DomainError(
+                code="BACKPORT_ARGUMENT_REQUIRED",
+                message="Missing required argument for recheck_conflict.",
+                details={"action": "recheck_conflict", "keys": ["base_report_path", "baseReportPath"]},
+            )
+        if not isinstance(row, dict):
+            raise DomainError(
+                code="BACKPORT_ARGUMENT_REQUIRED",
+                message="Missing required row for recheck_conflict.",
+                details={"action": "recheck_conflict", "keys": ["row"]},
+            )
+        try:
+            return self._cvekit_client.recheck_conflict(
+                base_report_path=base_report_path,
+                working_report_path=working_report_path,
+                row=row,
+            )
+        except (RuntimeError, FileNotFoundError, ValueError) as error:
+            logger.exception("recheck_conflict failed")
+            return {
+                "operation": "recheck_conflict",
                 "status": "failed",
                 "summary": str(error),
                 "diagnostics": {"error_text": str(error)},
@@ -367,6 +398,49 @@ class BackportService:
             failed_row["error"] = str(error)
             return {
                 "operation": "apply_row",
+                "status": "failed",
+                "summary": str(error),
+                "diagnostics": {"error_text": str(error)},
+                "report": {"commit_count": 1, "commits": [failed_row]},
+            }
+
+    def _run_try_resolve(self, payload: dict[str, Any]) -> dict[str, Any]:
+        config = self._extract_config(payload)
+        base_report_path = self._require_string(payload, "try_resolve", "base_report_path", "baseReportPath")
+        working_report_path = self._get_string(
+            payload,
+            "working_report_path",
+            "workingReportPath",
+            "current_filtered_report_path",
+            "currentFilteredReportPath",
+        )
+        row = payload.get("row")
+        if not isinstance(row, dict) or not row:
+            raise DomainError(
+                code="BACKPORT_ROW_INVALID",
+                message="row must be a non-empty object.",
+                details={"action": "try_resolve"},
+            )
+        try:
+            return self._cvekit_client.try_resolve(
+                base_report_path=base_report_path,
+                row=row,
+                target_path=self._resolve_target_path(payload, config, operation="try_resolve"),
+                patch_dataset_dir=config["patch_dataset_dir"],
+                signer_name=config["signer_name"],
+                signer_email=config["signer_email"],
+                commit_message_template=config["commit_message_template"],
+                commit_message_source=config["commit_message_source"],
+                linux_repo_path=config["linux_repo_path"],
+                working_report_path=working_report_path,
+            )
+        except (RuntimeError, FileNotFoundError, ValueError) as error:
+            logger.exception("try_resolve failed")
+            failed_row = dict(row)
+            failed_row["status"] = "failed"
+            failed_row["error"] = str(error)
+            return {
+                "operation": "try_resolve",
                 "status": "failed",
                 "summary": str(error),
                 "diagnostics": {"error_text": str(error)},
@@ -532,7 +606,7 @@ class BackportService:
             or self._get_string(artifacts, "report_path")
             or self._get_string(report, "report_path")
         )
-        if action in {"generate_report", "refresh_report"} and report_path:
+        if action in {"generate_report", "continue_report", "recheck_conflict", "try_resolve"} and report_path:
             config["current_report_path"] = report_path
 
         filtered_report_path = self._get_string(artifacts, "filtered_report_path")
