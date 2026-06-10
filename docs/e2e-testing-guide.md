@@ -407,6 +407,7 @@ stateDiagram-v2
 | `created_at` | datetime | 创建时间 |
 | `updated_at` | datetime | 更新时间 |
 | `default_session_id` | string \| null | 默认会话 ID |
+| `process_port` | integer \| null | 本地进程沙箱的端口号（仅 `sandbox_type=local_process` 时有值） |
 
 补充说明：
 - `default_session_id` 是 Agent 创建成功后立即创建的默认 session
@@ -425,7 +426,7 @@ stateDiagram-v2
     "id": "agent-uuid-1",
     "name": "my-agent",
     "description": "这是一个测试智能体",
-    "sandbox_type": "docker",
+    "sandbox_type": "local_process",
     "adapter_type": "openclaw",
     "status": "running",
     "sandbox_id": null,
@@ -435,7 +436,8 @@ stateDiagram-v2
     "mcp_server_list": ["mcp-server-id-1"],
     "created_at": "2026-04-10T12:00:00",
     "updated_at": "2026-04-10T12:00:00",
-    "default_session_id": "session-uuid"
+    "default_session_id": "session-uuid",
+    "process_port": 8000
   }
 ]
 ```
@@ -456,7 +458,7 @@ stateDiagram-v2
   "id": "agent-uuid",
   "name": "my-agent",
   "description": "这是一个测试智能体",
-  "sandbox_type": "docker",
+  "sandbox_type": "local_process",
   "adapter_type": "openclaw",
   "status": "running",
   "sandbox_id": null,
@@ -466,7 +468,8 @@ stateDiagram-v2
   "mcp_server_list": ["mcp-server-id-1"],
   "created_at": "2026-04-10T12:00:00",
   "updated_at": "2026-04-10T12:00:00",
-  "default_session_id": "session-uuid"
+  "default_session_id": "session-uuid",
+  "process_port": 8000
 }
 ```
 
@@ -503,10 +506,10 @@ stateDiagram-v2
 {
   "id": "agent-uuid",
   "name": "my-agent",
-  "sandbox_type": "docker",
+  "sandbox_type": "local_process",
   "adapter_type": "openclaw",
   "status": "paused",
-  "sandbox_id": "container-id",
+  "sandbox_id": "sandbox-id",
   "workspace_path": "/path/to/workspace",
   "idle_timeout_seconds": 3600,
   "has_scheduled_tasks": false,
@@ -539,17 +542,18 @@ stateDiagram-v2
 {
   "id": "agent-uuid",
   "name": "my-agent",
-  "sandbox_type": "docker",
+  "sandbox_type": "local_process",
   "adapter_type": "openclaw",
   "status": "running",
-  "sandbox_id": "container-id",
+  "sandbox_id": "sandbox-id",
   "workspace_path": "/path/to/workspace",
   "idle_timeout_seconds": 3600,
   "has_scheduled_tasks": false,
   "mcp_server_list": ["mcp-server-id-1"],
   "created_at": "2026-04-10T12:00:00",
   "updated_at": "2026-04-10T12:35:00",
-  "default_session_id": "session-uuid"
+  "default_session_id": "session-uuid",
+  "process_port": 8000
 }
 ```
 
