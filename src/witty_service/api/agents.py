@@ -96,13 +96,11 @@ def list_agents(
 
             sessions = services.session_manager.list_sessions(agent.id)
             default_session_id = sessions[0].id if sessions else None
-            skills = _safe_list_agent_skills(manager=manager, agent=agent)
 
             base = _to_agent_response(
                 agent,
                 default_session_id=default_session_id,
                 process_port=process_port,
-                skills=skills,
             )
             result.append(
                 AgentWithConversationsResponse(
@@ -130,13 +128,11 @@ def list_agents(
             if sandbox_state is not None:
                 process_port = sandbox_state.sandbox_payload_json.get("metadata", {}).get("port")
 
-        skills = _safe_list_agent_skills(manager=manager, agent=agent)
         result.append(
             _to_agent_response(
                 agent,
                 default_session_id=default_session_id,
                 process_port=process_port,
-                skills=skills,
             )
         )
     return result
@@ -154,7 +150,7 @@ def get_agent(agent_id: str, services: ServiceContainer = Depends(get_services))
         # 沙箱进程已停止
         sessions = services.session_manager.list_sessions(agent_id)
         default_session_id = sessions[0].id if sessions else None
-        return _to_agent_response(agent, default_session_id=default_session_id, process_port=None, skills=[])
+        return _to_agent_response(agent, default_session_id=default_session_id, process_port=None)
 
     if agent is None:
         raise DomainError(
@@ -172,8 +168,7 @@ def get_agent(agent_id: str, services: ServiceContainer = Depends(get_services))
         if sandbox_state is not None:
             process_port = sandbox_state.sandbox_payload_json.get("metadata", {}).get("port")
 
-    skills = _safe_list_agent_skills(manager=manager, agent=agent)
-    return _to_agent_response(agent, default_session_id=default_session_id, process_port=process_port, skills=skills)
+    return _to_agent_response(agent, default_session_id=default_session_id, process_port=process_port)
 
 
 @router.delete("/{agent_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -248,7 +243,7 @@ def pause_agent(agent_id: str, services: ServiceContainer = Depends(get_services
     agent = manager.pause_agent(agent_id)
     sessions = services.session_manager.list_sessions(agent_id)
     default_session_id = sessions[0].id if sessions else None
-    return _to_agent_response(agent, default_session_id=default_session_id, skills=[])
+    return _to_agent_response(agent, default_session_id=default_session_id)
 
 
 @router.post("/{agent_id}/resume", response_model=AgentResponse)
@@ -258,8 +253,7 @@ async def resume_agent(agent_id: str, services: ServiceContainer = Depends(get_s
     agent = await manager.resume_agent(agent_id)
     sessions = services.session_manager.list_sessions(agent_id)
     default_session_id = sessions[0].id if sessions else None
-    skills = _safe_list_agent_skills(manager=manager, agent=agent)
-    return _to_agent_response(agent, default_session_id=default_session_id, skills=skills)
+    return _to_agent_response(agent, default_session_id=default_session_id)
 
 
 @router.get("/{agent_id}/sessions", response_model=list[SessionResponse])
@@ -551,7 +545,6 @@ def _to_agent_response(
     agent: AgentRecord,
     default_session_id: str | None,
     process_port: int | None = None,
-    skills: list[dict[str, Any]] | None = None,
 ) -> AgentResponse:
     """组装 agent API 响应。"""
     return AgentResponse(
@@ -571,7 +564,6 @@ def _to_agent_response(
         updated_at=agent.updated_at,
         default_session_id=default_session_id,
         process_port=process_port,
-        skills=skills or [],
     )
 
 
@@ -588,18 +580,6 @@ def _to_agent_skill_response(item: Any) -> AgentSkillResponse:
         skill_source=item.skill_source,
         skill_md_url=item.skill_md_url,
     )
-
-
-def _safe_list_agent_skills(manager: Any, agent: AgentRecord) -> list[dict[str, Any]]:
-    """安全获取 agent skills，失败时降级为空列表。"""
-    if agent.status == AgentStatus.error:
-        return []
-
-    try:
-        return manager.list_agent_skills(agent.id)
-    except Exception:
-        logger.warning("Failed to fetch agent skills, fallback to empty list: agent_id=%s", agent.id, exc_info=True)
-        return []
 
 
 async def _build_sse_streaming_response(event_stream: AsyncIterator[dict[str, Any]]) -> StreamingResponse:

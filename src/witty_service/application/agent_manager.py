@@ -14,6 +14,8 @@ from uuid import NAMESPACE_URL, uuid4, uuid5
 
 logger = logging.getLogger(__name__)
 
+_recovery_lock = asyncio.Lock()
+
 
 def _log_prefix(agent_id: str | None = None, session_id: str | None = None) -> str:
     parts = []
@@ -115,6 +117,10 @@ class AgentRepository(Protocol):
     ) -> AgentRecord: ...
 
     def get_agent(self, agent_id: str) -> AgentRecord | None: ...
+
+    def list_agents_needing_recovery(
+        self, sandbox_type: str | None = None, status_filter: list[AgentStatus] | None = None
+    ) -> list[AgentRecord]: ...
 
     def update_agent_status(
         self,
@@ -780,12 +786,137 @@ class AgentManager:
             return await self._resume_from_paused(agent_id)
         elif agent.status == AgentStatus.deleted:
             return await self._resume_from_deleted(agent_id)
+        elif agent.status == AgentStatus.running:
+            return await self._resume_from_running(agent_id)
         else:
             raise DomainError(
                 code=INVALID_AGENT_TRANSITION,
                 message="Cannot resume from current status.",
                 details={"agent_id": agent_id, "status": agent.status.value},
             )
+
+    async def _resume_from_running(self, agent_id: str) -> AgentRecord:
+        """从 running 状态恢复（用于服务重启时，子进程已停止但数据库状态仍为 running）"""
+        agent = self._get_agent(agent_id)
+        prefix = _log_prefix(agent_id=agent_id)
+        logger.info(f"{prefix}Resuming agent from running state (service restart recovery)")
+
+        # 1. 重新启动沙箱
+        sandbox_handle = self._sandbox_backend.start(
+            agent_id=agent_id,
+            workspace_path=agent.workspace_path,
+        )
+        adapter_endpoint = self._sandbox_backend.endpoint(sandbox_handle)
+        logger.info(f"{prefix}Sandbox restarted: base_url=%s", adapter_endpoint.base_url)
+
+        # 2. 保存沙箱状态
+        self._repository.save_sandbox_state(
+            agent_id,
+            sandbox_payload_json=self._sandbox_handle_payload(sandbox_handle),
+            adapter_base_url=adapter_endpoint.base_url,
+            adapter_ready=True,
+        )
+
+        # 3. 等待沙箱就绪（增加超时时间到60秒）
+        adaptor_client = self._get_adaptor_http_client(agent_id)
+        try:
+            for attempt in range(60):
+                if await adaptor_client.health_check():
+                    logger.info(f"{prefix}Sandbox ready after {attempt + 1} attempts")
+                    break
+                await asyncio.sleep(1)
+            else:
+                raise DomainError(
+                    code=SANDBOX_NOT_READY,
+                    message="Sandbox health check timeout during recovery.",
+                    details={"agent_id": agent_id},
+                )
+        finally:
+            await adaptor_client.close()
+
+        # 4. 调用 /agent/start（增加超时时间到180秒，因为可能需要加载模型）
+        adaptor_client = self._get_adaptor_http_client(agent_id)
+        remote_runtime_agent_id: str | None = None
+        try:
+            start_payload = self._build_agent_start_payload_for_recovery(agent)
+            logger.debug(f"{prefix}/agent/start payload for recovery: %s", start_payload)
+            try:
+                started_agent = await adaptor_client.post("/agent/start", json=start_payload, timeout=180.0)
+                remote_runtime_agent_id = started_agent.get("id")
+                if not isinstance(remote_runtime_agent_id, str) or not remote_runtime_agent_id:
+                    raise DomainError(
+                        code=RUNTIME_START_FAILED,
+                        message="Started agent response missing runtime agent id during recovery.",
+                        details={"agent_id": agent_id},
+                    )
+                logger.info(f"{prefix}/agent/start succeeded: runtime_agent_id=%s", remote_runtime_agent_id)
+            except httpx.HTTPStatusError as exc:
+                logger.error(f"{prefix}/agent/start failed with HTTP error: %s", exc)
+                raise DomainError(
+                    code=RUNTIME_START_FAILED,
+                    message="Failed to start runtime during recovery.",
+                    details={"agent_id": agent_id, "error": str(exc)},
+                ) from exc
+            except httpx.ReadTimeout as exc:
+                logger.error(f"{prefix}/agent/start timeout: %s", exc)
+                raise DomainError(
+                    code=RUNTIME_START_FAILED,
+                    message="Runtime start timed out during recovery.",
+                    details={"agent_id": agent_id, "error": "ReadTimeout"},
+                ) from exc
+            except httpx.ConnectError as exc:
+                logger.error(f"{prefix}/agent/start connection failed: %s", exc)
+                raise DomainError(
+                    code=RUNTIME_START_FAILED,
+                    message="Failed to connect to runtime during recovery.",
+                    details={"agent_id": agent_id, "error": "ConnectError"},
+                ) from exc
+        finally:
+            await adaptor_client.close()
+
+        # 5. 创建 session（与 create_agent 保持一致）
+        adaptor_client = self._get_adaptor_http_client(agent_id)
+        try:
+            try:
+                response = await adaptor_client.post(
+                    f"/agents/{remote_runtime_agent_id}/sessions",
+                    json={},
+                    timeout=30.0,
+                )
+                logger.info(f"{prefix}/agents/sessions succeeded: session_id=%s", response.get("id", "unknown"))
+            except httpx.HTTPStatusError as exc:
+                logger.error(f"{prefix}/agents/sessions failed: %s", exc)
+                raise DomainError(
+                    code=AGENT_CREATE_FAILED,
+                    message="Failed to create session on agent during recovery.",
+                    details={"agent_id": agent_id, "error": str(exc)},
+                ) from exc
+        finally:
+            await adaptor_client.close()
+
+        # 6. 更新状态（保持 running 状态，但更新时间戳）
+        return self._repository.update_agent_status(agent_id, AgentStatus.running)
+
+    def _build_agent_start_payload_for_recovery(self, agent: AgentRecord) -> dict[str, Any]:
+        """构建恢复时 /agent/start 请求的 payload"""
+        if agent.model_id is None:
+            return {"model_id": None, "model": {}}
+        
+        model = self._repository.get_model(agent.model_id)
+        if model is not None:
+            model_info = {
+                "name": model.name,
+                "provider": model.provider,
+                "api_key": model.api_key,
+                "api_base_url": model.api_base_url,
+            }
+        else:
+            model_info = {}
+
+        return {
+            "model_id": agent.model_id,
+            "model": model_info,
+        }
 
     async def send_message(
         self,
@@ -1590,6 +1721,14 @@ class AgentManager:
 
         # 只对 local_process 类型进行检查
         if agent.sandbox_type != "local_process":
+            return agent
+
+        # 如果正在恢复中，跳过健康检查（避免恢复过程中状态被修改）
+        if _recovery_lock.locked():
+            self._logger.debug(
+                "Skipping health check during recovery: agent_id=%s",
+                agent_id,
+            )
             return agent
 
         # 检查沙箱进程是否还在运行

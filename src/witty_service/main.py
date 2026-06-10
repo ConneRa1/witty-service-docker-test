@@ -92,6 +92,74 @@ def create_app(*, services: ServiceContainer | None = None) -> FastAPI:
                     "Failed to recover stale message: %s", msg.id, exc_info=True
                 )
 
+    @app.on_event("startup")
+    def recover_local_process_agents() -> None:
+        import asyncio
+        from witty_service.application.agent_manager import _recovery_lock
+        from witty_service.domain.enums import AgentStatus
+
+        async def _recover_single_agent(agent, services, repository):
+            """恢复单个 agent"""
+            agent_id = agent.id
+            try:
+                logger.info("Recovering running agent: id=%s name=%s", agent_id, agent.name)
+                agent_manager = services.get_agent_manager_for_agent(agent_id)
+                await agent_manager.resume_agent(agent_id)
+                logger.info("Successfully recovered running agent: id=%s", agent_id)
+                return {"agent_id": agent_id, "success": True, "error": None}
+            except Exception as exc:
+                logger.error(
+                    "Failed to recover running agent: id=%s error=%s",
+                    agent_id,
+                    exc,
+                    exc_info=True,
+                )
+                try:
+                    repository.update_agent_status(agent_id, AgentStatus.error)
+                except Exception:
+                    logger.warning(
+                        "Failed to update agent status to error: id=%s",
+                        agent_id,
+                        exc_info=True,
+                    )
+                return {"agent_id": agent_id, "success": False, "error": str(exc)}
+
+        async def _recover_agents():
+            services = app.state.services
+            repository = services.repository
+
+            agents_needing_recovery = repository.list_agents_needing_recovery(
+                sandbox_type="local_process",
+                status_filter=[AgentStatus.running],
+            )
+            if not agents_needing_recovery:
+                logger.info("No running local_process agents need recovery")
+                return
+
+            agent_count = len(agents_needing_recovery)
+            logger.info(
+                "Found %d running local_process agent(s) needing recovery",
+                agent_count,
+            )
+
+            async with _recovery_lock:
+                logger.info("Acquired recovery lock, starting recovery...")
+                results = []
+                for agent in agents_needing_recovery:
+                    result = await _recover_single_agent(agent, services, repository)
+                    results.append(result)
+
+                success_count = sum(1 for r in results if r["success"])
+                fail_count = agent_count - success_count
+                logger.info(
+                    "Recovery completed: %d succeeded, %d failed",
+                    success_count,
+                    fail_count,
+                )
+            logger.info("Released recovery lock")
+
+        asyncio.create_task(_recover_agents())
+
     app.include_router(agents_router)
     app.include_router(cve_router)
     app.include_router(models_router)

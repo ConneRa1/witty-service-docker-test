@@ -7,13 +7,14 @@ from typing import Any
 class AdaptorHttpClient:
     """HTTP 客户端，用于调用 witty-agent-server API"""
 
-    def __init__(self, base_url: str) -> None:
+    def __init__(self, base_url: str, timeout: float = 30.0) -> None:
         self.base_url = base_url.rstrip("/")
+        self._timeout = timeout
         self._client: httpx.AsyncClient | None = None
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None:
-            self._client = httpx.AsyncClient(base_url=self.base_url, timeout=30.0)
+            self._client = httpx.AsyncClient(base_url=self.base_url, timeout=self._timeout)
         return self._client
 
     async def close(self) -> None:
@@ -21,10 +22,10 @@ class AdaptorHttpClient:
             await self._client.aclose()
             self._client = None
 
-    async def post(self, path: str, json: dict[str, Any] | None = None) -> dict[str, Any]:
+    async def post(self, path: str, json: dict[str, Any] | None = None, timeout: float | None = None) -> dict[str, Any]:
         """发送 POST 请求"""
         client = await self._get_client()
-        response = await client.post(path, json=json)
+        response = await client.post(path, json=json, timeout=timeout)
         response.raise_for_status()
         return response.json()
 

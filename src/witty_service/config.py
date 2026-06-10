@@ -202,15 +202,18 @@ class WorkspaceSettings:
     环境变量:
         WITTY_WORKSPACE_ROOT: 工作空间根目录, 默认 ~/.witty
         WITTY_AGENT_SERVER_APP_DIR: Agent 服务器应用目录, 可选
+        WITTY_RECOVERY_MAX_CONCURRENT: 启动时恢复 agent 的最大并发数, 默认 5
     """
     root: str = "~/.witty"
     agent_server_app_dir: str | None = None
+    recovery_max_concurrent: int = 5
 
     @classmethod
     def from_env(cls) -> "WorkspaceSettings":
         return cls(
             root=os.getenv("WITTY_WORKSPACE_ROOT", "~/.witty"),
             agent_server_app_dir=os.getenv("WITTY_AGENT_SERVER_APP_DIR"),
+            recovery_max_concurrent=int(os.getenv("WITTY_RECOVERY_MAX_CONCURRENT", "5")),
         )
 
     def root_path(self) -> Path:

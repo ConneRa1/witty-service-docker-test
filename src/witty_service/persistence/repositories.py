@@ -332,6 +332,19 @@ class SqliteRepository:
             )
             return [self._to_agent_record(row) for row in rows]
 
+    def list_agents_needing_recovery(self, sandbox_type: str | None = None, status_filter: list[AgentStatus] | None = None) -> list[AgentRecord]:
+        """获取需要在服务重启时恢复的 agent"""
+        with self._session_factory() as session:
+            if status_filter is None:
+                status_filter = [AgentStatus.running, AgentStatus.paused]
+            query = session.query(AgentORM).filter(
+                AgentORM.status.in_([s.value for s in status_filter])
+            )
+            if sandbox_type:
+                query = query.filter(AgentORM.sandbox_type == sandbox_type)
+            rows = query.order_by(AgentORM.created_at.asc()).all()
+            return [self._to_agent_record(row) for row in rows]
+
     def list_agents_with_conversations(self) -> list[dict[str, Any]]:
         with self._session_factory() as session:
             msg_count_subq = (
@@ -683,18 +696,15 @@ class SqliteRepository:
             )
 
     def compact_message_delta_events(self, message_id: str) -> None:
+        from sqlalchemy import select
+
         BATCH = 500
         with self._session_factory() as session:
             while True:
-                subq = (
-                    session.query(MessageEventORM.id)
-                    .filter(
-                        MessageEventORM.message_id == message_id,
-                        MessageEventORM.event_type == "message.delta",
-                    )
-                    .limit(BATCH)
-                    .subquery()
-                )
+                subq = select(MessageEventORM.id).filter(
+                    MessageEventORM.message_id == message_id,
+                    MessageEventORM.event_type == "message.delta",
+                ).limit(BATCH)
                 deleted = (
                     session.query(MessageEventORM)
                     .filter(MessageEventORM.id.in_(subq))
