@@ -183,6 +183,7 @@ class BackportCvekitClient:
                 "--llm-base-url",
                 "--llm-model-name",
                 "--backport-engine",
+                "--format-mode",
             },
         )
         llm_config = self._get_llm_config(mcp_options, mcp_env)
@@ -193,6 +194,7 @@ class BackportCvekitClient:
             ("--llm-model-name", llm_config.get("model_name")),
             ("--api-key", llm_config.get("api_key")),
             ("--backport-engine", mcp_options.get("--backport-engine")),
+            ("--format-mode", mcp_options.get("--format-mode")),
         ):
             if value and option not in existing_options:
                 cmd_args.extend([option, value])
