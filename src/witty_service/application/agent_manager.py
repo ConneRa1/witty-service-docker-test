@@ -664,6 +664,14 @@ class AgentManager:
                 AgentStatus.running,
             )
             logger.info(f"{prefix}Agent creation complete: status=running")
+
+            # 同步 builtin skills 到数据库
+            try:
+                self.sync_installed_agent_skills(agent_id)
+                logger.info(f"{prefix}Builtin skills synced successfully")
+            except Exception:
+                logger.warning(f"{prefix}Failed to sync builtin skills, continuing...", exc_info=True)
+
             return AgentCreateResult(
                 agent=replace(running_agent, workspace_path=workspace_path),
             )

@@ -110,6 +110,7 @@ curl -s http://127.0.0.1:8000/healthz
 |---|---|---|
 | `/healthz` | `GET` | 服务存活检查 |
 | `/agents` | `POST` | 创建 Agent |
+| `/agents/agenthub` | `POST` | 从远程 git 模板仓库创建 Agent |
 | `/agents` | `GET` | 列出所有 Agent |
 | `/skills/repos` | `GET` | 查询技能仓库列表 |
 | `/skills/repos` | `POST` | 通过 Git 仓库注册技能仓库，并异步触发 discover |
@@ -413,6 +414,56 @@ stateDiagram-v2
 - `default_session_id` 是 Agent 创建成功后立即创建的默认 session
 - 这个默认 session 的远端 `runtime_agent_id` 不是通过 `POST /agents` 入参传入，而是由内部 `/agent/start` 结果决定
 - 如果你需要把后续 session 显式路由到某个 remote runtime agent（例如 `dev`），应在 `POST /agents/{agent_id}/sessions?runtime_agent_id=dev` 时传入
+
+#### 1a. `POST /agents/agenthub`
+
+- 接口描述：从远程 git 仓库拉取 agent 模板（UAS v1.0 规范的 `agent.yaml`），解析后自动创建 Agent 并安装模板中定义的 skills 和 system prompt
+- 说明：
+  - 仓库会缓存到 `~/.witty/agent_templates/{repo_name}/`，已有缓存时执行 `git pull` 确保最新
+  - 使用 `gitpython` 库进行 clone/pull，支持 `depth=1` 浅克隆
+  - Agent 的 `name`、`description` 取自模板中的 `agent.yaml`
+  - System prompt 通过 `/agent/prompt/set` 接口注入到 runtime（OpenClaw CLI `openclaw agent config set`）
+  - Skills 通过 `/agent/skills/install` 逐个安装，支持 `source`（外部文件）和 `inline`（内联）两种定义方式
+- 输入（`CreateAgentHubRequest`）：
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `git_url` | string | 是 | 远程 git 仓库地址 |
+| `branch` | string | 否 | git 分支，默认 `main` |
+| `sandbox_type` | string | 是 | 沙箱类型：`docker`、`local_process`、`e2b` |
+| `adapter_type` | string | 是 | 适配器类型：如 `openclaw` |
+| `idle_timeout_seconds` | integer | 是 | 空闲超时时间（秒），必须大于 0 |
+| `sandbox_id` | string | 否 | 沙箱 ID |
+| `has_scheduled_tasks` | boolean | 否 | 是否有定时任务，默认 `false` |
+| `model_id` | string | 否 | 模型 ID，关联 `/models` 中配置的模型 |
+
+- 输出 `201`（`AgentResponse`，与 `POST /agents` 相同）
+
+请求示例：
+
+```json
+{
+  "git_url": "https://gitcode.com/duan_pengjie/agent_template.git",
+  "branch": "main",
+  "sandbox_type": "local_process",
+  "adapter_type": "openclaw",
+  "idle_timeout_seconds": 300,
+  "model_id": "your-model-id"
+}
+```
+
+执行流程：
+
+```mermaid
+flowchart TD
+    A[POST /agents/agenthub] --> B[克隆/拉取 git 仓库]
+    B --> C[解析 agent.yaml]
+    C --> D[创建 Agent（name/description 来自模板）]
+    D --> E[启动沙箱 → /agent/start]
+    E --> F[安装 skills（逐个下发）]
+    F --> G[设置 system prompt（/agent/prompt/set）]
+    G --> H[返回 AgentResponse]
+```
 
 #### 2. `GET /agents`
 
@@ -1162,6 +1213,7 @@ data: {"sandbox_type":"local_process","event":{"type":"message.delta","session_i
 | `SKILL_SYNC_FAILED` | 500 | 从 runtime 同步已安装技能失败 |
 | `SKILL_INSTALL_RECORD_FAILED` | 500 | runtime 已安装成功，但本地安装记录持久化失败 |
 | `SKILL_UNINSTALL_RECORD_FAILED` | 500 | runtime 已卸载成功，但本地安装记录删除失败 |
+| `TEMPLATE_REPO_CLONE_FAILED` | 500 | 从 git 克隆 agent 模板仓库失败 |
 
 **HTTP 状态码映射规则：**
 - 以 `_NOT_FOUND` 结尾 → `404`
@@ -1293,6 +1345,34 @@ curl -s -X POST "http://127.0.0.1:8000/agents/${AGENT_ID}/pause" \
 curl -s -X POST "http://127.0.0.1:8000/agents/${AGENT_ID}/resume" \
   -H 'authorization: Bearer YOUR_TOKEN'
 ```
+
+清理：
+
+```bash
+curl -s -X DELETE "http://127.0.0.1:8000/agents/${AGENT_ID}" \
+  -H 'authorization: Bearer YOUR_TOKEN'
+```
+
+### 4.3 从 AgentHub 创建 Agent 场景
+
+从远程 git 模板仓库创建 Agent，模板中的 `name`、`description`、skills、system prompt 会自动配置：
+
+```bash
+AGENT_ID=$(
+  curl -s -X POST http://127.0.0.1:8000/agents/agenthub \
+    -H 'content-type: application/json' \
+    -H 'authorization: Bearer YOUR_TOKEN' \
+    -d '{
+      "git_url": "https://gitcode.com/duan_pengjie/agent_template.git",
+      "branch": "main",
+      "sandbox_type": "local_process",
+      "adapter_type": "openclaw",
+      "idle_timeout_seconds": 300
+    }' | jq -r '.id'
+)
+```
+
+后续的消息发送、会话管理等操作与普通 Agent 相同。
 
 清理：
 

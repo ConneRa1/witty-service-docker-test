@@ -30,6 +30,18 @@ class CreateAgentRequest(BaseModel):
     mcp_server_list: list[str] = Field(default_factory=list)
 
 
+class CreateAgentHubRequest(BaseModel):
+    """从 git 模板创建 agent 的请求。"""
+    git_url: str = Field(min_length=1, description="远程 git 仓库地址")
+    branch: str = Field(default="main", description="git 分支")
+    sandbox_type: str = Field(min_length=1)
+    adapter_type: str = Field(min_length=1)
+    idle_timeout_seconds: int = Field(gt=0)
+    sandbox_id: str | None = None
+    has_scheduled_tasks: bool = False
+    model_id: str | None = None
+
+
 class SendMessageRequest(BaseModel):
     content: str = Field(min_length=1)
 

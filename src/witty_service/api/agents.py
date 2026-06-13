@@ -15,6 +15,7 @@ from witty_service.api.schemas import (
     AgentWithConversationsResponse,
     ConversationDetailResponse,
     ConversationSummaryResponse,
+    CreateAgentHubRequest,
     CreateAgentRequest,
     InstallAgentSkillRequest,
     McpServerResponse,
@@ -29,6 +30,7 @@ from witty_service.api.services import ServiceContainer
 from witty_service.adapter.http_client import AdaptorHttpClient
 from witty_service.application.agent_manager import AGENT_NOT_FOUND, SKILL_NOT_FOUND, \
 SKILL_INSTALL_RECORD_FAILED, SKILL_UNINSTALL_RECORD_FAILED, SKILL_SYNC_FAILED, AgentCreateRequest
+from witty_service.application.agent_template_service import AgentTemplateService
 from witty_service.application.skill_manager import SkillManager
 from witty_service.domain.enums import AgentStatus
 from witty_service.domain.errors import DomainError
@@ -60,6 +62,37 @@ def create_agent(
             model_id=payload.model_id,
             mcp_server_list=payload.mcp_server_list,
         )
+    )
+
+    # Extract port for local_process sandbox
+    process_port: int | None = None
+    if payload.sandbox_type == "local_process":
+        sandbox_state = services.repository.get_sandbox_state(result.agent.id)
+        if sandbox_state is not None:
+            process_port = sandbox_state.sandbox_payload_json.get("metadata", {}).get("port")
+
+    return _to_agent_response(result.agent, default_session_id=None, process_port=process_port)
+
+
+@router.post("/agenthub", response_model=AgentResponse, status_code=status.HTTP_201_CREATED)
+def create_agent_from_agenthub(
+    payload: CreateAgentHubRequest,
+    services: ServiceContainer = Depends(get_services),
+) -> AgentResponse:
+    """从远程 git 仓库拉取 agent 模板（agent.yaml），解析并创建 agent。"""
+    template_service = AgentTemplateService(
+        repository=services.repository,
+        agent_manager_factory=services.get_agent_manager_for_sandbox,
+    )
+    result = template_service.create_agent_from_template(
+        git_url=payload.git_url,
+        branch=payload.branch,
+        sandbox_type=payload.sandbox_type,
+        adapter_type=payload.adapter_type,
+        idle_timeout_seconds=payload.idle_timeout_seconds,
+        sandbox_id=payload.sandbox_id,
+        has_scheduled_tasks=payload.has_scheduled_tasks,
+        model_id=payload.model_id,
     )
 
     # Extract port for local_process sandbox
