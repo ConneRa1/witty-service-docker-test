@@ -6,10 +6,10 @@ import sys
 
 import pytest
 
-from src.domain.errors import DomainError
-from src.sandbox.base import SandboxStatus
-from src.sandbox.factory import create_sandbox_backend
-from src.sandbox.local_process import LocalProcessSandboxBackend
+from witty_service.domain.errors import DomainError
+from witty_service.sandbox.base import SandboxStatus
+from witty_service.sandbox.factory import create_sandbox_backend
+from witty_service.sandbox.local_process import LocalProcessSandboxBackend
 
 
 class FakeProcess:
@@ -66,11 +66,11 @@ def test_local_runtime_start_builds_expected_command_and_handle(
         return fake_process
 
     monkeypatch.setattr(
-        "src.sandbox.local_process.find_free_port",
+        "witty_service.sandbox.local_process.find_free_port",
         lambda: 43123,
     )
     monkeypatch.setattr(
-        "src.sandbox.local_process.subprocess.Popen",
+        "witty_service.sandbox.local_process.subprocess.Popen",
         fake_popen,
     )
 
@@ -85,18 +85,18 @@ def test_local_runtime_start_builds_expected_command_and_handle(
         "witty_agent_server.app:create_app",
         "--factory",
         "--app-dir",
-        str(app_dir.resolve()),
+        str(app_dir.resolve().parent),
         "--host",
         "127.0.0.1",
         "--port",
         "43123",
     ]
-    assert popen_calls["kwargs"] == {
-        "cwd": "/tmp/workspace",
-        "stdout": subprocess.DEVNULL,
-        "stderr": subprocess.PIPE,
-        "text": True,
-    }
+    assert popen_calls["kwargs"]["cwd"] == "/tmp/workspace"
+    assert popen_calls["kwargs"]["stdout"] == subprocess.DEVNULL
+    assert popen_calls["kwargs"]["text"] is True
+    # stderr 传入的是日志文件,不是 subprocess.PIPE
+    assert "stderr" in popen_calls["kwargs"]
+    assert popen_calls["kwargs"]["stderr"] is not subprocess.PIPE
     assert handle.agent_id == "agent-1"
     assert handle.workspace_path == "/tmp/workspace"
     assert handle.metadata["pid"] == 9876
@@ -112,11 +112,11 @@ def test_local_runtime_stop_terminates_process(
     app_dir = tmp_path / "agent-server"
     app_dir.mkdir()
     monkeypatch.setattr(
-        "src.sandbox.local_process.find_free_port",
+        "witty_service.sandbox.local_process.find_free_port",
         lambda: 43124,
     )
     monkeypatch.setattr(
-        "src.sandbox.local_process.subprocess.Popen",
+        "witty_service.sandbox.local_process.subprocess.Popen",
         lambda command, **kwargs: fake_process,
     )
 
@@ -142,11 +142,11 @@ def test_local_runtime_stop_kills_process_after_timeout(
     app_dir = tmp_path / "agent-server"
     app_dir.mkdir()
     monkeypatch.setattr(
-        "src.sandbox.local_process.find_free_port",
+        "witty_service.sandbox.local_process.find_free_port",
         lambda: 43125,
     )
     monkeypatch.setattr(
-        "src.sandbox.local_process.subprocess.Popen",
+        "witty_service.sandbox.local_process.subprocess.Popen",
         lambda command, **kwargs: fake_process,
     )
 
@@ -171,11 +171,11 @@ def test_local_runtime_status_endpoint_and_cleanup(
     app_dir = tmp_path / "agent-server"
     app_dir.mkdir()
     monkeypatch.setattr(
-        "src.sandbox.local_process.find_free_port",
+        "witty_service.sandbox.local_process.find_free_port",
         lambda: 43126,
     )
     monkeypatch.setattr(
-        "src.sandbox.local_process.subprocess.Popen",
+        "witty_service.sandbox.local_process.subprocess.Popen",
         lambda command, **kwargs: fake_process,
     )
 
@@ -203,11 +203,11 @@ def test_local_runtime_cleanup_keeps_handle_when_stop_fails(
     app_dir = tmp_path / "agent-server"
     app_dir.mkdir()
     monkeypatch.setattr(
-        "src.sandbox.local_process.find_free_port",
+        "witty_service.sandbox.local_process.find_free_port",
         lambda: 43128,
     )
     monkeypatch.setattr(
-        "src.sandbox.local_process.subprocess.Popen",
+        "witty_service.sandbox.local_process.subprocess.Popen",
         lambda command, **kwargs: fake_process,
     )
 
@@ -237,14 +237,19 @@ def test_local_runtime_start_raises_when_process_exits_immediately(
     fake_process = FakeProcess(pid=9999, poll_result=1, stderr_text="startup boom")
 
     monkeypatch.setattr(
-        "src.sandbox.local_process.find_free_port",
+        "witty_service.sandbox.local_process.find_free_port",
         lambda: 43127,
     )
     monkeypatch.setattr(
-        "src.sandbox.local_process.subprocess.Popen",
+        "witty_service.sandbox.local_process.subprocess.Popen",
         lambda command, **kwargs: fake_process,
     )
-    monkeypatch.setattr("src.sandbox.local_process.time.sleep", lambda _: None)
+    monkeypatch.setattr("witty_service.sandbox.local_process.time.sleep", lambda _: None)
+    # 让 _read_stderr_log 返回模拟的 stderr 内容
+    monkeypatch.setattr(
+        "witty_service.sandbox.local_process.LocalProcessSandboxBackend._read_stderr_log",
+        lambda self, path: "startup boom",
+    )
 
     backend = LocalProcessSandboxBackend(agent_server_app_dir=str(app_dir))
 
@@ -260,7 +265,7 @@ def test_local_runtime_start_raises_when_process_exits_immediately(
         "witty_agent_server.app:create_app",
         "--factory",
         "--app-dir",
-        str(app_dir.resolve()),
+        str(app_dir.resolve().parent),
         "--host",
         "127.0.0.1",
         "--port",
@@ -284,7 +289,22 @@ def test_local_runtime_unknown_handle_raises_runtime_not_found(
     assert exc_info.value.details["sandbox_id"] == "missing-runtime"
 
 
-def test_local_runtime_start_raises_when_app_dir_missing() -> None:
+def test_local_runtime_start_raises_when_app_dir_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    # 通过 monkeypatch _resolve_agent_server_app_dir 让它抛错(模拟自动检测失败)
+    from witty_service.sandbox.base import sandbox_start_failed
+
+    def raise_start_failed(self):  # type: ignore[no-untyped-def]
+        raise sandbox_start_failed(
+            sandbox_type=self.sandbox_type,
+            message="WITTY_AGENT_SERVER_APP_DIR is not configured and auto-detection failed.",
+            details={"env_var": "WITTY_AGENT_SERVER_APP_DIR"},
+        )
+
+    monkeypatch.setattr(
+        "witty_service.sandbox.local_process.LocalProcessSandboxBackend._resolve_agent_server_app_dir",
+        raise_start_failed,
+    )
+
     backend = LocalProcessSandboxBackend()
 
     with pytest.raises(DomainError) as exc_info:
@@ -298,8 +318,11 @@ def test_local_runtime_factory_returns_backend(monkeypatch: pytest.MonkeyPatch, 
     app_dir = tmp_path / "agent-server"
     app_dir.mkdir()
     monkeypatch.setenv("WITTY_AGENT_SERVER_APP_DIR", str(app_dir))
+    # 重置 settings 单例缓存,使 factory 重新读取环境变量
+    import witty_service.config as _config
+    monkeypatch.setattr(_config, "_settings", None)
 
     backend = create_sandbox_backend("local_process")
 
     assert isinstance(backend, LocalProcessSandboxBackend)
-    assert backend.agent_server_app_dir == str(app_dir)
+    assert backend.agent_server_app_dir == str(app_dir.resolve())

@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 from fastapi.testclient import TestClient
 
-from src.main import create_app
+from witty_service.main import create_app
 
 
 def test_send_message_returns_sandbox_type_and_events(monkeypatch):

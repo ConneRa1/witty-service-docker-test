@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from src.storage.runtime_backup import RuntimeBackupStore
+from witty_service.storage.runtime_backup import RuntimeBackupStore
 
 
 class TestBackup:

@@ -1,5 +1,5 @@
 def test_adapter_exports():
-    from src.adapter import (
+    from witty_service.adapter import (
         WebSocketClient,
         WebSocketClientPool,
         AdaptorEndpoint,

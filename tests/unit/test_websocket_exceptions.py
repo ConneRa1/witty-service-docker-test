@@ -1,5 +1,5 @@
 import pytest
-from src.adapter.exceptions import (
+from witty_service.adapter.exceptions import (
     AdaptorConnectionError,
     AdaptorConnectionTimeout,
     AdaptorSendFailed,

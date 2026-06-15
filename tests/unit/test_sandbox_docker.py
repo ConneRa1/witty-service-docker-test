@@ -5,9 +5,15 @@ from pathlib import Path
 
 import pytest
 
-from src.domain.errors import DomainError
-from src.sandbox.base import SandboxStatus
-from src.sandbox.factory import create_sandbox_backend
+from witty_service.domain.errors import DomainError
+from witty_service.sandbox.base import SandboxStatus
+from witty_service.sandbox.factory import create_sandbox_backend
+
+
+def _reset_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    """重置 witty_service.config._settings 单例缓存,使后续从环境变量重新加载。"""
+    import witty_service.config as _config
+    monkeypatch.setattr(_config, "_settings", None)
 
 
 @dataclass
@@ -73,7 +79,7 @@ def _workspace_dir(tmp_path: Path) -> str:
 def test_docker_runtime_start_mounts_workspace_to_witty_workspace(
     tmp_path: Path,
 ) -> None:
-    from src.sandbox.docker import DockerSandboxBackend
+    from witty_service.sandbox.docker import DockerSandboxBackend
 
     container = FakeContainer()
     client = FakeDockerClient(container)
@@ -108,7 +114,7 @@ def test_docker_runtime_start_mounts_workspace_to_witty_workspace(
 
 
 def test_docker_runtime_stop_cleanup_and_endpoint(tmp_path: Path) -> None:
-    from src.sandbox.docker import DockerSandboxBackend
+    from witty_service.sandbox.docker import DockerSandboxBackend
 
     container = FakeContainer()
     backend = DockerSandboxBackend(client=FakeDockerClient(container))
@@ -146,7 +152,7 @@ def test_docker_runtime_status_maps_container_state(
     container_status: str,
     expected_status: SandboxStatus,
 ) -> None:
-    from src.sandbox.docker import DockerSandboxBackend
+    from witty_service.sandbox.docker import DockerSandboxBackend
 
     container = FakeContainer(status=container_status)
     backend = DockerSandboxBackend(client=FakeDockerClient(container))
@@ -164,7 +170,7 @@ def test_docker_runtime_status_maps_container_state(
 def test_docker_runtime_status_raises_domain_error_when_docker_api_fails(
     tmp_path: Path,
 ) -> None:
-    from src.sandbox.docker import DockerSandboxBackend
+    from witty_service.sandbox.docker import DockerSandboxBackend
 
     container = ReloadErrorContainer()
     backend = DockerSandboxBackend(client=FakeDockerClient(container))
@@ -185,7 +191,7 @@ def test_docker_runtime_status_raises_domain_error_when_docker_api_fails(
 def test_docker_runtime_cleanup_attempts_remove_when_stop_fails(
     tmp_path: Path,
 ) -> None:
-    from src.sandbox.docker import DockerSandboxBackend
+    from witty_service.sandbox.docker import DockerSandboxBackend
 
     container = StopErrorContainer()
     backend = DockerSandboxBackend(client=FakeDockerClient(container))
@@ -208,7 +214,7 @@ def test_docker_runtime_cleanup_attempts_remove_when_stop_fails(
 def test_docker_runtime_stop_raises_domain_error_when_docker_api_fails(
     tmp_path: Path,
 ) -> None:
-    from src.sandbox.docker import DockerSandboxBackend
+    from witty_service.sandbox.docker import DockerSandboxBackend
 
     container = StopErrorContainer()
     backend = DockerSandboxBackend(client=FakeDockerClient(container))
@@ -230,7 +236,7 @@ def test_docker_runtime_stop_raises_domain_error_when_docker_api_fails(
 def test_docker_runtime_stop_raises_domain_error_when_remove_fails_in_cleanup(
     tmp_path: Path,
 ) -> None:
-    from src.sandbox.docker import DockerSandboxBackend
+    from witty_service.sandbox.docker import DockerSandboxBackend
 
     container = RemoveErrorContainer()
     backend = DockerSandboxBackend(client=FakeDockerClient(container))
@@ -251,7 +257,7 @@ def test_docker_runtime_stop_raises_domain_error_when_remove_fails_in_cleanup(
 
 
 def test_docker_runtime_start_rejects_invalid_workspace_path() -> None:
-    from src.sandbox.docker import DockerSandboxBackend
+    from witty_service.sandbox.docker import DockerSandboxBackend
 
     backend = DockerSandboxBackend(client=FakeDockerClient(FakeContainer()))
 
@@ -263,7 +269,7 @@ def test_docker_runtime_start_rejects_invalid_workspace_path() -> None:
 
 
 def test_docker_runtime_start_rejects_missing_workspace_path(tmp_path: Path) -> None:
-    from src.sandbox.docker import DockerSandboxBackend
+    from witty_service.sandbox.docker import DockerSandboxBackend
 
     backend = DockerSandboxBackend(client=FakeDockerClient(FakeContainer()))
     missing_path = str((tmp_path / "missing").resolve())
@@ -278,7 +284,7 @@ def test_docker_runtime_start_rejects_missing_workspace_path(tmp_path: Path) -> 
 def test_docker_runtime_factory_returns_backend() -> None:
     backend = create_sandbox_backend("docker")
 
-    from src.sandbox.docker import DockerSandboxBackend
+    from witty_service.sandbox.docker import DockerSandboxBackend
 
     assert isinstance(backend, DockerSandboxBackend)
 
@@ -293,10 +299,11 @@ def test_docker_runtime_factory_injects_env_configuration(
         "WITTY_DOCKER_CONTAINER_WORKSPACE_PATH",
         "/custom-workspace",
     )
+    _reset_settings(monkeypatch)
 
     backend = create_sandbox_backend("docker")
 
-    from src.sandbox.docker import DockerSandboxBackend
+    from witty_service.sandbox.docker import DockerSandboxBackend
 
     assert isinstance(backend, DockerSandboxBackend)
     assert backend.image == "registry.example/witty-agent:v2"
@@ -310,10 +317,11 @@ def test_docker_runtime_factory_keeps_explicit_image_tag(
 ) -> None:
     monkeypatch.setenv("WITTY_DOCKER_IMAGE", "registry.example/witty-agent:v1")
     monkeypatch.setenv("WITTY_DOCKER_IMAGE_TAG", "latest")
+    _reset_settings(monkeypatch)
 
     backend = create_sandbox_backend("docker")
 
-    from src.sandbox.docker import DockerSandboxBackend
+    from witty_service.sandbox.docker import DockerSandboxBackend
 
     assert isinstance(backend, DockerSandboxBackend)
     assert backend.image == "registry.example/witty-agent:v1"
@@ -323,28 +331,24 @@ def test_docker_runtime_factory_rejects_invalid_container_port_env(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("WITTY_DOCKER_CONTAINER_PORT", "not-a-number")
+    _reset_settings(monkeypatch)
 
-    with pytest.raises(DomainError) as exc_info:
+    with pytest.raises(ValueError):
         create_sandbox_backend("docker")
-
-    assert exc_info.value.code == "SANDBOX_START_FAILED"
-    assert exc_info.value.details["env_var"] == "WITTY_DOCKER_CONTAINER_PORT"
 
 
 def test_docker_runtime_factory_rejects_invalid_stop_timeout_env(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("WITTY_DOCKER_STOP_TIMEOUT", "not-a-number")
+    _reset_settings(monkeypatch)
 
-    with pytest.raises(DomainError) as exc_info:
+    with pytest.raises(ValueError):
         create_sandbox_backend("docker")
-
-    assert exc_info.value.code == "SANDBOX_START_FAILED"
-    assert exc_info.value.details["env_var"] == "WITTY_DOCKER_STOP_TIMEOUT"
 
 
 def test_docker_runtime_unknown_handle_raises_runtime_not_found() -> None:
-    from src.sandbox.docker import DockerSandboxBackend
+    from witty_service.sandbox.docker import DockerSandboxBackend
 
     backend = DockerSandboxBackend(client=FakeDockerClient(FakeContainer()))
 

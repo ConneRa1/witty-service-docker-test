@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import pytest
 
-from src.domain.errors import DomainError
-from src.sandbox.base import SandboxBackend
-from src.sandbox.e2b import E2BSandboxBackend
-from src.sandbox.factory import create_sandbox_backend, register_sandbox_backend
+from witty_service.domain.errors import DomainError
+from witty_service.sandbox.base import SandboxBackend
+from witty_service.sandbox.e2b import E2BSandboxBackend
+from witty_service.sandbox.factory import create_sandbox_backend, register_sandbox_backend
 
 
 @pytest.mark.parametrize(

@@ -1,4 +1,4 @@
-from src.sandbox.base import AdapterEndpoint
+from witty_service.sandbox.base import AdapterEndpoint
 
 def test_ws_url_for_http():
     endpoint = AdapterEndpoint(base_url="http://localhost:8080")

@@ -1,5 +1,5 @@
 from typing import Any
-from src.adapter.websocket_protocol import InboundEvent, OutboundMessage
+from witty_service.adapter.websocket_protocol import InboundEvent, OutboundMessage
 
 def test_inbound_event_structure():
     event: InboundEvent = {

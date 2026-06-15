@@ -2,7 +2,7 @@ import asyncio
 import httpx
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
-from src.adapter.http_client import AdaptorHttpClient
+from witty_service.adapter.http_client import AdaptorHttpClient
 
 
 def test_client_initialization():
@@ -94,7 +94,7 @@ def test_post_success():
 
         result = await client.post("/api/test", json={"key": "value"})
 
-        mock_client.post.assert_called_once_with("/api/test", json={"key": "value"})
+        mock_client.post.assert_called_once_with("/api/test", json={"key": "value"}, timeout=None)
         mock_response.raise_for_status.assert_called_once()
         assert result == {"status": "ok"}
 
@@ -203,7 +203,7 @@ def test_health_check_success():
 
         result = await client.health_check()
 
-        mock_client.get.assert_called_once_with("/v1/ping")
+        mock_client.get.assert_called_once_with("/ping")
         assert result is True
 
     asyncio.run(run())

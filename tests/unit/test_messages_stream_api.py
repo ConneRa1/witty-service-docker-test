@@ -5,8 +5,8 @@ from unittest.mock import MagicMock
 
 from fastapi.testclient import TestClient
 
-from src.domain.errors import DomainError
-from src.main import create_app
+from witty_service.domain.errors import DomainError
+from witty_service.main import create_app
 
 
 def _parse_sse_payloads(body: bytes) -> list[dict[str, object]]:

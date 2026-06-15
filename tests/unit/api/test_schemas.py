@@ -3,7 +3,7 @@ from datetime import datetime
 import pytest
 from pydantic import ValidationError
 
-from src.api.schemas import (
+from witty_service.api.schemas import (
     PaginationInfo,
     SessionEventItem,
     SessionEventPage,

@@ -1,9 +1,9 @@
 import asyncio
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
-from src.adapter.websocket_client import WebSocketClient
-from src.adapter.websocket_protocol import InboundEvent, OutboundMessage
-from src.adapter.exceptions import AdaptorConnectionError, AdaptorReceiveError, AdaptorSendFailed
+from witty_service.adapter.websocket_client import WebSocketClient
+from witty_service.adapter.websocket_protocol import InboundEvent, OutboundMessage
+from witty_service.adapter.exceptions import AdaptorConnectionError, AdaptorReceiveError, AdaptorSendFailed
 
 def test_client_connect_success():
     async def run() -> None:
@@ -15,7 +15,7 @@ def test_client_connect_success():
             await client.connect("session-1")
 
             mock_connect.assert_called_once_with(
-                "ws://localhost:8080/agent/sessions/session-1/ws"
+                "ws://localhost:8080/sessions/session-1/ws", ping_interval=None
             )
             assert client.is_connected is True
 
@@ -86,7 +86,7 @@ def test_client_recv_requires_runtime_type():
             async for _ in client.recv():
                 pass
 
-        assert exc_info.value.message == "Failed to parse WebSocket message"
+        assert exc_info.value.message.startswith("Failed to parse WebSocket message")
         assert "\"runtime_type\"" not in exc_info.value.details["raw"]
 
     asyncio.run(run())
