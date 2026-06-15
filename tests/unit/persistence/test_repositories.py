@@ -449,3 +449,135 @@ def test_replace_installed_agent_skills_from_runtime_normalizes_snapshot(
     assert [
         item.skill_name for item in repo.list_installed_agent_skills("agent-1")
     ] == ["Write"]
+
+
+def test_repository_summary_queries_and_agent_delete(repo: SqliteRepository) -> None:
+    _create_agent(repo)
+    _create_session(repo, session_id="session-1")
+    _create_session(repo, session_id="session-2")
+    repo.update_session_metadata("session-1", title="Pinned", pinned=True)
+    repo.create_message(
+        agent_id="agent-1",
+        session_id="session-1",
+        role="user",
+        content="hello world",
+    )
+    repo.create_message(
+        agent_id="agent-1",
+        session_id="session-1",
+        role="assistant",
+        content="hi",
+        status=MessageStatus.completed,
+    )
+
+    sessions = repo.list_sessions_with_summary("agent-1")
+    agents = repo.list_agents_with_conversations()
+
+    assert [item["id"] for item in sessions] == ["session-1", "session-2"]
+    assert sessions[0]["title"] == "Pinned"
+    assert sessions[0]["message_count"] == 2
+    assert sessions[0]["last_message_status"] == "completed"
+    assert agents[0]["id"] == "agent-1"
+    assert [item["id"] for item in agents[0]["conversations"]] == [
+        "session-1",
+        "session-2",
+    ]
+
+    repo.delete_agent("agent-1")
+    repo.delete_agent("missing")
+
+    assert repo.get_agent("agent-1") is None
+    assert repo.list_agents_with_conversations() == []
+
+
+def test_messages_with_events_pagination_and_tool_calls(repo: SqliteRepository) -> None:
+    _create_agent(repo)
+    _create_session(repo)
+    first_id = repo.create_message(
+        agent_id="agent-1",
+        session_id="session-1",
+        role="assistant",
+        content="first",
+        status=MessageStatus.completed,
+    )
+    second_id = repo.create_message(
+        agent_id="agent-1",
+        session_id="session-1",
+        role="assistant",
+        content="second",
+        status=MessageStatus.generating,
+    )
+    repo.create_message_event_with_retry(
+        agent_id="agent-1",
+        session_id="session-1",
+        message_id=second_id,
+        event_type="tool.call.started",
+        payload_json={
+            "tool_call_id": "tool-1",
+            "tool_name": "shell",
+            "arguments": {"cmd": "echo hi"},
+        },
+        seq_no=1,
+    )
+    repo.create_message_event_with_retry(
+        agent_id="agent-1",
+        session_id="session-1",
+        message_id=second_id,
+        event_type="tool.call.response",
+        payload_json={
+            "tool_call_id": "tool-1",
+            "content": "hi",
+            "duration": 12,
+            "is_error": False,
+        },
+        seq_no=2,
+    )
+    first_page, has_more = repo.get_messages_with_events("session-1", limit=1)
+    before = first_page[0]["timestamp"].replace("Z", "+00:00")
+    empty_page, empty_has_more = repo.get_messages_with_events(
+        "session-1",
+        limit=10,
+        before=before,
+    )
+
+    assert has_more is True
+    assert first_page[0]["id"] == second_id
+    assert first_page[0]["isStreaming"] is True
+    assert first_page[0]["toolCalls"] == [
+        {
+            "id": "tool-1",
+            "name": "shell",
+            "status": "completed",
+            "input": {"cmd": "echo hi"},
+            "output": "hi",
+            "duration": 12,
+        }
+    ]
+    assert empty_page[0]["id"] == first_id
+    assert empty_has_more is False
+
+
+def test_create_assistant_message_and_stream_updates(repo: SqliteRepository) -> None:
+    _create_agent(repo)
+    _create_session(repo)
+    event_id, seq_no = repo.create_message_event_with_retry(
+        agent_id="agent-1",
+        session_id="session-1",
+        message_id=None,
+        event_type="message.delta",
+        payload_json={"delta": "hello"},
+        seq_no=1,
+    )
+
+    message_id = repo.create_assistant_message_and_bind_events(
+        agent_id="agent-1",
+        session_id="session-1",
+        content="hello",
+        event_ids=[event_id],
+    )
+    repo.update_message_stream_at(message_id)
+    messages, _ = repo.get_messages_with_events("session-1")
+
+    assert seq_no == 1
+    assert messages[0]["id"] == message_id
+    assert messages[0]["content"] == "hello"

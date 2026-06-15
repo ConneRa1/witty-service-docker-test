@@ -149,3 +149,8 @@ prerelease = false
 allowed_tags = ["build", "chore", "ci", "docs", "feat", "fix", "perf", "refactor", "style", "test"]
 minor_tags = ["feat"]
 patch_tags = ["fix", "perf","refactor"]
+
+[dependency-groups]
+dev = [
+    "pytest-cov>=7.1.0",
+]
