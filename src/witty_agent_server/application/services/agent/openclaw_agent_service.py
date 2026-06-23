@@ -249,6 +249,7 @@ class OpenClawAgentService(AgentServiceBase):
                 allowed_current=(AgentStatus.RUNNING, AgentStatus.PAUSED),
                 target=AgentStatus.STOPPED,
             )
+            self._stop_openclaw()
             return self.agent
 
     def list_agents(self) -> dict[str, Any]:

@@ -26,22 +26,33 @@ class OpenClawSkillService(AgentSkillServiceBase):
     runtime_type = "openclaw"
     skills_dir = Path.home() / ".openclaw" / "skills"
 
-    _ALLOWED_DELETE_BASES: list[Path] = [
-        skills_dir,
-        Path.home() / ".agent" / "skills",
-        Path.home() / ".openclaw" / "workspace/skills",
-        Path.home() / ".openclaw" / "workspace/.agents/skills",
-        Path.home() / ".openclaw" / "plugin-skills",
-    ]
+    @classmethod
+    def _get_workspace_skills_dir(cls, agent_id: str | None) -> Path:
+        """获取 agent 专属的技能安装目录"""
+        if agent_id:
+            return Path.home() / ".openclaw" / f"workspace-{agent_id}" / "skills"
+        return cls.skills_dir
+
+    _ALLOWED_DELETE_BASES: list[Path] = []
+
+    @classmethod
+    def _build_allowed_delete_bases(cls, agent_id: str | None) -> list[Path]:
+        """构建包含 agent 专属目录的允许删除路径列表"""
+        if not agent_id:
+            return []
+        return [
+            Path.home() / ".openclaw" / f"workspace-{agent_id}" / "skills",
+        ]
 
     _ALLOWED_SOURCE_BASES: list[Path] = [
         get_settings().workspace.root_path() / "skill-repositories",
     ]
 
     @classmethod
-    def _validate_path_under_allowed_bases(cls, target: Path) -> Path:
+    def _validate_path_under_allowed_bases(cls, target: Path, agent_id: str | None = None) -> Path:
         resolved = target.expanduser().resolve()
-        for base in cls._ALLOWED_DELETE_BASES:
+        allowed_bases = cls._build_allowed_delete_bases(agent_id)
+        for base in allowed_bases:
             base_resolved = base.resolve()
             try:
                 resolved.relative_to(base_resolved)
@@ -50,7 +61,7 @@ class OpenClawSkillService(AgentSkillServiceBase):
                 continue
         raise ValueError(
             f"Path {resolved} is outside allowed directories: "
-            f"{[str(b) for b in cls._ALLOWED_DELETE_BASES]}"
+            f"{[str(b) for b in allowed_bases]}"
         )
 
     @classmethod
@@ -140,65 +151,71 @@ class OpenClawSkillService(AgentSkillServiceBase):
         skill_name: str,
         source_path: str | None = None,
     ) -> dict[str, Any]:
-        normalized_name = self._normalize_skill_name(
-            skill_name=skill_name,
-            error_cls=OpenClawSkillsInstallError,
-        )
-
-        if source_path:
-            return self._install_local_skill(normalized_name, source_path)
+        install_target = source_path if source_path else skill_name
+        is_local = self._is_local_path(install_target)
+        
+        command = ["openclaw", "skills", "install", install_target]
+        
+        if agent_id:
+            command.extend(["--profile", agent_id])
+        
         try:
-            install_channel = "clawhub_cmd"
-            self._install_skill_via_clawhub(normalized_name)
-            self._openclaw_client.enable_skill(
-                agent_id=agent_id,
-                skill_name=normalized_name,
+            result = subprocess.run(
+                command,
+                check=True,
+                capture_output=True,
+                text=True,
+                cwd=Path.home(),
             )
-        except OpenClawSkillsInstallError as cmd_exc:
-            logger.warning(
-                (
-                    "install_skill clawhub command failed, fallback to gateway rpc, "
-                    "runtime_type=%s agent_id=%s skill_name=%s code=%s message=%s"
-                ),
+            
+            logger.info(
+                "install_skill success, runtime_type=%s agent_id=%s target=%s stdout=%s",
                 self.runtime_type,
                 agent_id,
-                normalized_name,
-                cmd_exc.code,
-                cmd_exc.details.get("reason"),
+                install_target,
+                result.stdout.strip(),
             )
-            try:
-                install_channel = "gateway_rpc"
-                self._openclaw_client.install_skill(
-                    agent_id=agent_id,
-                    skill_name=normalized_name,
-                    version=None,
-                    force=True,
-                )
-            except OpenClawGatewayClientError as rpc_exc:
-                raise OpenClawSkillsInstallError(
-                    runtime_type=self.runtime_type,
-                    skill_name=normalized_name,
-                    reason=(
-                        "clawhub install failed "
-                        f"({cmd_exc.details.get('reason')}); "
-                        "gateway rpc fallback failed "
-                        f"({rpc_exc.code}: {rpc_exc.message})"
-                    ),
-                ) from rpc_exc
-
-        logger.info(
-            "install_skill success, runtime_type=%s agent_id=%s skill_name=%s channel=%s",
-            self.runtime_type,
-            agent_id,
-            normalized_name,
-            install_channel,
+            
+            return {
+                "runtime_type": self.runtime_type,
+                "skill_name": skill_name,
+                "installed": True,
+                "install_channel": "local" if is_local else "clawhub",
+                "stdout": result.stdout.strip(),
+            }
+        
+        except FileNotFoundError as exc:
+            raise OpenClawSkillsInstallError(
+                runtime_type=self.runtime_type,
+                skill_name=skill_name,
+                reason="openclaw command not found",
+            ) from exc
+        except subprocess.CalledProcessError as exc:
+            stderr = (exc.stderr or "").strip()
+            stdout = (exc.stdout or "").strip()
+            reason = stderr or stdout or f"openclaw exited with code {exc.returncode}"
+            raise OpenClawSkillsInstallError(
+                runtime_type=self.runtime_type,
+                skill_name=skill_name,
+                reason=reason,
+            ) from exc
+        except Exception as exc:
+            raise OpenClawSkillsInstallError(
+                runtime_type=self.runtime_type,
+                skill_name=skill_name,
+                reason=str(exc),
+            ) from exc
+    
+    @staticmethod
+    def _is_local_path(path: str) -> bool:
+        path = path.strip()
+        return (
+            path.startswith("/") 
+            or path.startswith("~") 
+            or path.startswith(".")
+            or "\\" in path
+            or ("/" in path and not path.startswith("http://") and not path.startswith("https://"))
         )
-        return {
-            "runtime_type": self.runtime_type,
-            "skill_name": normalized_name,
-            "installed": True,
-            "install_channel": install_channel,
-        }
 
     def _install_local_skill(self, skill_name: str, source_path: str) -> dict[str, Any]:
         src = Path(source_path).expanduser().resolve()
@@ -291,49 +308,10 @@ class OpenClawSkillService(AgentSkillServiceBase):
             error_cls=OpenClawSkillsUninstallError,
         )
 
-        if source_type in ("local", "git"):
-            return self._uninstall_local_skill(normalized_name)
-
         if source_type == "builtin" and source_path:
-            return self._uninstall_builtin_skill(normalized_name, source_path)
+            return self._uninstall_builtin_skill(normalized_name, source_path, agent_id=agent_id)
 
-        try:
-            uninstall_channel = "clawhub_cmd"
-            self._uninstall_skill_via_clawhub(normalized_name)
-        except OpenClawSkillsUninstallError as cmd_exc:
-            logger.warning(
-                (
-                    "uninstall_skill clawhub command failed, fallback to gateway rpc, "
-                    "runtime_type=%s skill_name=%s reason=%s"
-                ),
-                self.runtime_type,
-                normalized_name,
-                cmd_exc.details.get("reason"),
-            )
-            try:
-                uninstall_channel = "gateway_rpc"
-                self._openclaw_client.uninstall_skill(
-                    agent_id=agent_id,
-                    skill_name=normalized_name,
-                )
-            except OpenClawGatewayClientError as rpc_exc:
-                raise OpenClawSkillsUninstallError(
-                    runtime_type=self.runtime_type,
-                    skill_name=normalized_name,
-                    reason=(
-                        "clawhub uninstall failed "
-                        f"({cmd_exc.details.get('reason')}); "
-                        "gateway rpc fallback failed "
-                        f"({rpc_exc.code}: {rpc_exc.message})"
-                    ),
-                ) from rpc_exc
-
-        return {
-            "runtime_type": self.runtime_type,
-            "skill_name": normalized_name,
-            "uninstalled": True,
-            "uninstall_channel": uninstall_channel,
-        }
+        return self._uninstall_local_skill(normalized_name, agent_id=agent_id)
 
     def _uninstall_skill_via_clawhub(self, skill_name: str) -> None:
         command = ["clawhub", "uninstall", skill_name, "--yes"]
@@ -365,22 +343,26 @@ class OpenClawSkillService(AgentSkillServiceBase):
                 reason=str(exc),
             ) from exc
 
-    def _uninstall_local_skill(self, skill_name: str) -> dict[str, Any]:
-        dst = self.skills_dir / skill_name
+    def _uninstall_local_skill(self, skill_name: str, agent_id: str | None = None) -> dict[str, Any]:
+        skills_dir = self._get_workspace_skills_dir(agent_id)
+        dst = skills_dir / skill_name
+        
         try:
-            dst = self._validate_path_under_allowed_bases(dst)
+            dst = self._validate_path_under_allowed_bases(dst, agent_id=agent_id)
         except ValueError as exc:
             raise OpenClawSkillsUninstallError(
                 runtime_type=self.runtime_type,
                 skill_name=skill_name,
                 reason=str(exc),
             ) from exc
+        
         if dst.exists():
             shutil.rmtree(dst)
 
         logger.info(
-            "uninstall_local_skill success, runtime_type=%s skill_name=%s dst=%s",
+            "uninstall_local_skill success, runtime_type=%s agent_id=%s skill_name=%s dst=%s",
             self.runtime_type,
+            agent_id,
             skill_name,
             dst,
         )
@@ -391,9 +373,9 @@ class OpenClawSkillService(AgentSkillServiceBase):
             "uninstall_channel": "local_remove",
         }
 
-    def _uninstall_builtin_skill(self, skill_name: str, source_path: str) -> dict[str, Any]:
+    def _uninstall_builtin_skill(self, skill_name: str, source_path: str, agent_id: str | None = None) -> dict[str, Any]:
         try:
-            dst = self._validate_path_under_allowed_bases(Path(source_path))
+            dst = self._validate_path_under_allowed_bases(Path(source_path), agent_id=agent_id)
         except ValueError as exc:
             raise OpenClawSkillsUninstallError(
                 runtime_type=self.runtime_type,

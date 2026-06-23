@@ -183,9 +183,29 @@ class OpenClawLifecycleService:
         return self._result_indicates_running(result)
 
     def stop(self) -> None:
+        """停止 openclaw gateway 并执行完整卸载"""
         if not self._profile:
             return
-        self._run_or_raise(action="stop")
+        
+        # 构建卸载命令
+        command = self._build_base_command() + [
+            "uninstall",
+            "--yes",
+            "--non-interactive",
+            "--all"
+        ]
+        
+        result = self._run_command(command)
+        if result.returncode != 0:
+            raise OpenClawLifecycleError(
+                action="uninstall",
+                command=command,
+                returncode=result.returncode,
+                stdout=result.stdout or "",
+                stderr=result.stderr or "",
+                message="openclaw uninstall failed",
+            )
+        
         self._stop_gateway_process()
 
     def start(self) -> None:

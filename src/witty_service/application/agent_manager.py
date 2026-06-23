@@ -36,7 +36,7 @@ from witty_service.domain.enums import AgentStatus, can_transition
 from witty_service.domain.errors import DomainError
 from witty_service.persistence.orm import MessageStatus
 from witty_service.persistence.repositories import AgentRecord, SessionRecord
-from witty_service.sandbox.base import SandboxHandle, SandboxStatus, sandbox_not_found
+from witty_service.sandbox.base import SandboxHandle, SandboxStatus, sandbox_not_found, SANDBOX_NOT_FOUND
 from witty_service.storage.runtime_backup import RuntimeBackupStore
 from .session_manager import SessionManager
 
@@ -414,8 +414,33 @@ class AgentManager:
         client: httpx.Client | None = None
         try:
             client = httpx.Client(base_url=sandbox_state.adapter_base_url, timeout=30.0)
-            response = client.get("/agent/skills")
-            response.raise_for_status()
+            
+            for attempt in range(10):
+                try:
+                    response = client.get("/agent/skills")
+                    response.raise_for_status()
+                    break
+                except httpx.HTTPStatusError as exc:
+                    if exc.response.status_code == 502 and attempt < 9:
+                        self._logger.debug(
+                            "Skills endpoint not ready yet (attempt %d/10): agent_id=%s",
+                            attempt + 1,
+                            agent_id,
+                        )
+                        time.sleep(1)
+                        continue
+                    raise
+                except httpx.ConnectError as exc:
+                    if attempt < 9:
+                        self._logger.debug(
+                            "Skills endpoint connection failed (attempt %d/10): agent_id=%s",
+                            attempt + 1,
+                            agent_id,
+                        )
+                        time.sleep(1)
+                        continue
+                    raise
+            
             payload = response.json()
 
             if isinstance(payload, list):
@@ -493,7 +518,7 @@ class AgentManager:
                 if source_path:
                     request_body["source_path"] = source_path
                 payload = await adaptor_client.post(
-                    "/agent/skills/install",
+                    f"/agent/skills/install?id={agent_id}",
                     json=request_body,
                 )
             except httpx.HTTPError as exc:
@@ -535,7 +560,7 @@ class AgentManager:
                 if source_path:
                     request_body["source_path"] = source_path
                 payload = await adaptor_client.post(
-                    "/agent/skills/uninstall",
+                    f"/agent/skills/uninstall?id={agent_id}",
                     json=request_body,
                 )
             except httpx.HTTPError as exc:
@@ -789,11 +814,12 @@ class AgentManager:
         finally:
             await adaptor_client.close()
 
-        # 6. 调用 /agent/start
+        # 6. 调用 /agent/start（使用完整的恢复 payload）
         adaptor_client = self._get_adaptor_http_client(agent_id)
         try:
             try:
-                await adaptor_client.post("/agent/start", json={})
+                start_payload = self._build_agent_start_payload_for_recovery(agent)
+                await adaptor_client.post("/agent/start", json=start_payload)
             except httpx.HTTPStatusError as exc:
                 raise DomainError(
                     code=RUNTIME_START_FAILED,
@@ -809,29 +835,90 @@ class AgentManager:
     async def _resume_from_paused(self, agent_id: str) -> AgentRecord:
         """从 paused 状态恢复"""
         agent = self._get_agent(agent_id)
+        prefix = _log_prefix(agent_id=agent_id)
+        logger.info(f"{prefix}Resuming agent from paused state")
 
         # 1. 验证沙箱是否仍在运行
         sandbox_state = self._get_sandbox_state(agent_id)
-        status = self._sandbox_backend.status(sandbox_state.handle)
-        if status == SandboxStatus.stopped:
-            # 沙箱已停止，降级到 deleted 场景
-            return await self._resume_from_deleted(agent_id)
 
-        # 2. 调用 /agent/start
+        # 2. 等待沙箱就绪（增加超时时间到60秒）
+        adaptor_client = self._get_adaptor_http_client(agent_id)
+        try:
+            for attempt in range(60):
+                if await adaptor_client.health_check():
+                    logger.info(f"{prefix}Sandbox ready after {attempt + 1} attempts")
+                    break
+                await asyncio.sleep(1)
+            else:
+                raise DomainError(
+                    code=SANDBOX_NOT_READY,
+                    message="Sandbox health check timeout during resume from paused.",
+                    details={"agent_id": agent_id},
+                )
+        finally:
+            await adaptor_client.close()
+
+        # 3. 调用 /agent/start（增加超时时间到180秒，因为可能需要加载模型）
+        adaptor_client = self._get_adaptor_http_client(agent_id)
+        remote_runtime_agent_id: str | None = None
+        try:
+            start_payload = self._build_agent_start_payload_for_recovery(agent)
+            logger.debug(f"{prefix}/agent/start payload for resume from paused: %s", start_payload)
+            try:
+                started_agent = await adaptor_client.post("/agent/start", json=start_payload, timeout=180.0)
+                remote_runtime_agent_id = started_agent.get("id")
+                if not isinstance(remote_runtime_agent_id, str) or not remote_runtime_agent_id:
+                    raise DomainError(
+                        code=RUNTIME_START_FAILED,
+                        message="Started agent response missing runtime agent id during resume from paused.",
+                        details={"agent_id": agent_id},
+                    )
+                logger.info(f"{prefix}/agent/start succeeded: runtime_agent_id=%s", remote_runtime_agent_id)
+            except httpx.HTTPStatusError as exc:
+                logger.error(f"{prefix}/agent/start failed with HTTP error: %s", exc)
+                raise DomainError(
+                    code=RUNTIME_START_FAILED,
+                    message="Failed to start runtime during resume from paused.",
+                    details={"agent_id": agent_id, "error": str(exc)},
+                ) from exc
+            except httpx.ReadTimeout as exc:
+                logger.error(f"{prefix}/agent/start timeout: %s", exc)
+                raise DomainError(
+                    code=RUNTIME_START_FAILED,
+                    message="Runtime start timed out during resume from paused.",
+                    details={"agent_id": agent_id, "error": "ReadTimeout"},
+                ) from exc
+            except httpx.ConnectError as exc:
+                logger.error(f"{prefix}/agent/start connection failed: %s", exc)
+                raise DomainError(
+                    code=RUNTIME_START_FAILED,
+                    message="Failed to connect to runtime during resume from paused.",
+                    details={"agent_id": agent_id, "error": "ConnectError"},
+                ) from exc
+        finally:
+            await adaptor_client.close()
+
+        # 4. 创建 session（与 create_agent 保持一致）
         adaptor_client = self._get_adaptor_http_client(agent_id)
         try:
             try:
-                await adaptor_client.post("/agent/start", json={})
+                response = await adaptor_client.post(
+                    f"/agents/{remote_runtime_agent_id}/sessions",
+                    json={},
+                    timeout=30.0,
+                )
+                logger.info(f"{prefix}/agents/sessions succeeded: session_id=%s", response.get("id", "unknown"))
             except httpx.HTTPStatusError as exc:
+                logger.error(f"{prefix}/agents/sessions failed: %s", exc)
                 raise DomainError(
-                    code=RUNTIME_START_FAILED,
-                    message="Failed to start runtime.",
+                    code=AGENT_CREATE_FAILED,
+                    message="Failed to create session on agent during resume from paused.",
                     details={"agent_id": agent_id, "error": str(exc)},
                 ) from exc
         finally:
             await adaptor_client.close()
 
-        # 3. 更新状态
+        # 5. 更新状态
         return self._repository.update_agent_status(agent_id, AgentStatus.running)
 
     async def resume_agent(self, agent_id: str) -> AgentRecord:
@@ -903,14 +990,6 @@ class AgentManager:
                 )
         finally:
             await adaptor_client.close()
-
-        # 如果agent 已在沙箱内运行，无需再次调用 /agent/start 和创建 session
-        if sandbox_handle.metadata.get("reconnected"):
-            logger.info(
-                f"{prefix}Sandbox was reconnected (container survived restart), "
-                "skipping /agent/start and session creation"
-            )
-            return self._repository.update_agent_status(agent_id, AgentStatus.running)
 
         # 4. 调用 /agent/start（增加超时时间到180秒，因为可能需要加载模型）
         adaptor_client = self._get_adaptor_http_client(agent_id)
@@ -1813,7 +1892,8 @@ class AgentManager:
         if agent.status not in {AgentStatus.running, AgentStatus.paused}:
             return agent
 
-        if agent.sandbox_type not in ("local_process", "docker"):
+        # 只对 local_process 类型进行检查
+        if agent.sandbox_type != "local_process":
             return agent
 
         # 如果正在恢复中，跳过健康检查（避免恢复过程中状态被修改）
