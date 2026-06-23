@@ -93,7 +93,7 @@ def create_app(*, services: ServiceContainer | None = None) -> FastAPI:
                 )
 
     @app.on_event("startup")
-    def recover_local_process_agents() -> None:
+    def recover_agents() -> None:
         import asyncio
         from witty_service.application.agent_manager import _recovery_lock
         from witty_service.domain.enums import AgentStatus
@@ -124,22 +124,23 @@ def create_app(*, services: ServiceContainer | None = None) -> FastAPI:
                     )
                 return {"agent_id": agent_id, "success": False, "error": str(exc)}
 
-        async def _recover_agents():
+        async def _recover_agents(sandbox_type: str):
             services = app.state.services
             repository = services.repository
 
             agents_needing_recovery = repository.list_agents_needing_recovery(
-                sandbox_type="local_process",
+                sandbox_type=sandbox_type,
                 status_filter=[AgentStatus.running],
             )
             if not agents_needing_recovery:
-                logger.info("No running local_process agents need recovery")
+                logger.info("No running %s agents need recovery", sandbox_type)
                 return
 
             agent_count = len(agents_needing_recovery)
             logger.info(
-                "Found %d running local_process agent(s) needing recovery",
+                "Found %d running %s agent(s) needing recovery",
                 agent_count,
+                sandbox_type,
             )
 
             async with _recovery_lock:
@@ -159,11 +160,13 @@ def create_app(*, services: ServiceContainer | None = None) -> FastAPI:
                 logger.info("Application startup complete")
             logger.info("Released recovery lock")
 
-        # 使用 call_later 推迟到下一轮 event loop 迭代，
-        # 避免 recovery 任务在 uvicorn 输出 "Application startup complete" 之前运行。
-        asyncio.get_running_loop().call_later(
-            0, lambda: asyncio.create_task(_recover_agents())
-        )
+        for sandbox_type in ("local_process", "docker"):
+            # 使用 call_later 推迟到下一轮 event loop 迭代，
+            # 避免 recovery 任务在 uvicorn 输出 "Application startup complete" 之前运行。
+            asyncio.get_running_loop().call_later(
+                0,
+                lambda st=sandbox_type: asyncio.create_task(_recover_agents(st)),
+            )
 
     app.include_router(agents_router)
     app.include_router(cve_router)

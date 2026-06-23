@@ -25,6 +25,9 @@ from witty_agent_server.infra.ws.openclaw_gateway_client import (
 from witty_agent_server.application.services.agent.openclaw_lifecycle_service import (
     OpenClawLifecycleService,
 )
+from witty_agent_server.application.services.skill.openclaw_skill_service import (
+    OpenClawSkillService,
+)
 from witty_agent_server.logger.logging_config import configure_logging
 
 
@@ -80,7 +83,14 @@ def create_app(
         return JSONResponse(status_code=422, content=body.model_dump(exclude_none=True))
 
     app.include_router(base_router)
-    app.include_router(create_agent_router(resolved_agent_service))
+    app.include_router(
+        create_agent_router(
+            resolved_agent_service,
+            openclaw_skill_service=OpenClawSkillService(
+                openclaw_client=shared_gateway_client
+            ),
+        )
+    )
     app.include_router(
         create_session_router(
             resolved_session_service,

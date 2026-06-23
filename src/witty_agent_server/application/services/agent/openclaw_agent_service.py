@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
 
@@ -21,7 +22,10 @@ from witty_agent_server.application.services.agent.openclaw_lifecycle_service im
     OpenClawLifecycleService,
 )
 
-from witty_agent_server.infra.ws.openclaw_gateway_client import OpenClawGatewayClient
+from witty_agent_server.infra.ws.openclaw_gateway_client import (
+    OpenClawGatewayClient,
+    OpenClawGatewayClientError,
+)
 from witty_agent_server.runtimes.runtime_base import RuntimeType
 
 
@@ -209,15 +213,26 @@ class OpenClawAgentService(AgentServiceBase):
             self._lifecycle_service.onboard(
                 auth_choice=auth_choice,
                 api_key=api_key,
-                install_daemon=True,
+                install_daemon=False,
                 skip_channels=True,
                 skip_search=True,
                 skip_hooks=True,
+                skip_health=True,
             )
         except OpenClawLifecycleError as exc:
             raise AgentServiceError(
                 code="OPENCLAW_ONBOARD_FAILED",
                 message="openclaw onboard failed",
+                status_code=500,
+                details=self._lifecycle_error_details(exc),
+            ) from exc
+
+        try:
+            self._lifecycle_service.start_gateway()
+        except OpenClawLifecycleError as exc:
+            raise AgentServiceError(
+                code="OPENCLAW_GATEWAY_START_FAILED",
+                message="openclaw gateway start failed",
                 status_code=500,
                 details=self._lifecycle_error_details(exc),
             ) from exc
@@ -275,40 +290,58 @@ class OpenClawAgentService(AgentServiceBase):
         requested_agent_id: str | None,
     ) -> tuple[str, dict[str, Any]]:
         """从 Gateway agents.list 中解析目标 agent。"""
-        payload = self._gateway_agent_client.list_agents()
-        configured_agents = payload.get("agents")
-        if not isinstance(configured_agents, list):
-            configured_agents = []
-        configured_ids = [
-            str(item.get("id"))
-            for item in configured_agents
-            if isinstance(item, dict)
-            and isinstance(item.get("id"), str)
-            and item.get("id")
-        ]
+        deadline = time.time() + 30
+        last_error: Exception | None = None
+        while time.time() < deadline:
+            try:
+                payload = self._gateway_agent_client.list_agents()
+            except OpenClawGatewayClientError as exc:
+                last_error = exc
+                err_msg = getattr(exc, "message", "") or str(exc)
+                if "gateway starting" in err_msg.lower() or "retry shortly" in err_msg.lower():
+                    logger.info("Gateway still starting, retrying in 1s...")
+                    time.sleep(1)
+                    continue
+                raise
+            configured_agents = payload.get("agents")
+            if not isinstance(configured_agents, list):
+                configured_agents = []
+            configured_ids = [
+                str(item.get("id"))
+                for item in configured_agents
+                if isinstance(item, dict)
+                and isinstance(item.get("id"), str)
+                and item.get("id")
+            ]
 
-        resolved_agent_id = requested_agent_id
-        if resolved_agent_id is None:
-            default_id = payload.get("defaultId")
-            if not isinstance(default_id, str) or not default_id:
-                for item in configured_agents:
-                    if isinstance(item, dict) and item.get("default") is True:
-                        raw_id = item.get("id")
-                        if isinstance(raw_id, str) and raw_id:
-                            default_id = raw_id
-                            break
-            if not isinstance(default_id, str) or not default_id:
-                raise AgentDefaultNotConfiguredError()
-            resolved_agent_id = default_id
+            resolved_agent_id = requested_agent_id
+            if resolved_agent_id is None:
+                default_id = payload.get("defaultId")
+                if not isinstance(default_id, str) or not default_id:
+                    for item in configured_agents:
+                        if isinstance(item, dict) and item.get("default") is True:
+                            raw_id = item.get("id")
+                            if isinstance(raw_id, str) and raw_id:
+                                default_id = raw_id
+                                break
+                if not isinstance(default_id, str) or not default_id:
+                    raise AgentDefaultNotConfiguredError()
+                resolved_agent_id = default_id
 
-        for item in configured_agents:
-            if isinstance(item, dict) and item.get("id") == resolved_agent_id:
-                return resolved_agent_id, item
-        
+            for item in configured_agents:
+                if isinstance(item, dict) and item.get("id") == resolved_agent_id:
+                    return resolved_agent_id, item
 
-        raise AgentIdNotConfiguredError(
-            agent_id=resolved_agent_id,
-            configured_ids=configured_ids,
+            raise AgentIdNotConfiguredError(
+                agent_id=resolved_agent_id,
+                configured_ids=configured_ids,
+            )
+
+        raise AgentServiceError(
+            code="OPENCLAW_GATEWAY_START_FAILED",
+            message="openclaw gateway did not become ready within 30 seconds",
+            status_code=500,
+            details={"error": str(last_error) if last_error else "timeout"},
         )
 
     def _ensure_gateway_agent_loaded(self, *, agent_id: str) -> None:

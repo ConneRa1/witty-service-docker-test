@@ -130,7 +130,7 @@ def test_docker_runtime_stop_cleanup_and_endpoint(tmp_path: Path) -> None:
     backend.cleanup(handle)
 
     assert endpoint.base_url == "http://127.0.0.1:18081"
-    assert endpoint.health_url == "http://127.0.0.1:18081/v1/ping"
+    assert endpoint.health_url == "http://127.0.0.1:18081/ping"
     assert container.stop_called is True
     assert container.remove_called is True
     assert handle.sandbox_id not in backend._handles

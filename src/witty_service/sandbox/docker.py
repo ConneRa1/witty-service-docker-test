@@ -25,6 +25,8 @@ DEFAULT_CONTAINER_WORKSPACE_PATH = "/witty-workspace"
 class DockerSandboxBackend(SandboxBackend):
     sandbox_type = "docker"
 
+    CONTAINER_NAME_PREFIX = "witty-sandbox"
+
     def __init__(
         self,
         *,
@@ -58,12 +60,33 @@ class DockerSandboxBackend(SandboxBackend):
         **kwargs: Any,
     ) -> SandboxHandle:
         resolved_workspace_path = self._validate_workspace_path(workspace_path)
+
+        existing_handle = self._find_handle_by_agent_id(agent_id)
+        if existing_handle is not None:
+            return existing_handle
+
+        container_name = f"{self.CONTAINER_NAME_PREFIX}-{agent_id}"
+        existing_container = self._try_find_container(container_name)
+        if existing_container is not None:
+            handle = self._build_handle_from_container(
+                existing_container, agent_id, resolved_workspace_path
+            )
+            handle = SandboxHandle(
+                sandbox_id=handle.sandbox_id,
+                agent_id=handle.agent_id,
+                workspace_path=handle.workspace_path,
+                metadata={**handle.metadata, "reconnected": True},
+            )
+            self._handles[handle.sandbox_id] = handle
+            return handle
+
         host_port = int(kwargs.get("port", find_free_port()))
         environment = dict(kwargs.get("environment", {}))
 
         try:
             container = self._get_client().containers.run(
                 self.image,
+                name=container_name,
                 detach=True,
                 ports={f"{self.container_port}/tcp": host_port},
                 volumes={
@@ -87,12 +110,45 @@ class DockerSandboxBackend(SandboxBackend):
                 },
             ) from exc
 
-        sandbox_id = str(uuid4())
+        return self._build_handle_from_container(
+            container, agent_id, resolved_workspace_path, host_port=host_port
+        )
+
+    def _find_handle_by_agent_id(self, agent_id: str) -> SandboxHandle | None:
+        for handle in self._handles.values():
+            if handle.agent_id == agent_id:
+                return handle
+        return None
+
+    def _try_find_container(self, container_name: str) -> Any | None:
+        try:
+            container = self._get_client().containers.get(container_name)
+            container.reload()
+            if container.status == "running":
+                return container
+            try:
+                container.remove(force=True)
+            except Exception:
+                pass
+            return None
+        except Exception:
+            return None
+
+    def _build_handle_from_container(
+        self,
+        container: Any,
+        agent_id: str,
+        workspace_path: str,
+        host_port: int | None = None,
+    ) -> SandboxHandle:
+        if host_port is None:
+            host_port = self._extract_host_port(container)
         base_url = f"http://{self.host}:{host_port}"
+        sandbox_id = str(uuid4())
         handle = SandboxHandle(
             sandbox_id=sandbox_id,
             agent_id=agent_id,
-            workspace_path=resolved_workspace_path,
+            workspace_path=workspace_path,
             metadata={
                 "container_id": str(container.id),
                 "host_port": host_port,
@@ -106,6 +162,22 @@ class DockerSandboxBackend(SandboxBackend):
         self._handles[sandbox_id] = handle
         self._containers[sandbox_id] = container
         return handle
+
+    def _extract_host_port(self, container: Any) -> int:
+        port_key = f"{self.container_port}/tcp"
+        try:
+            ports = container.attrs["NetworkSettings"]["Ports"]
+            return int(ports[port_key][0]["HostPort"])
+        except (KeyError, IndexError, TypeError) as exc:
+            raise sandbox_start_failed(
+                sandbox_type=self.sandbox_type,
+                message="Failed to extract host port from container.",
+                details={
+                    "container_id": str(getattr(container, "id", "unknown")),
+                    "port_key": port_key,
+                    "error": str(exc),
+                },
+            ) from exc
 
     def stop(self, handle: SandboxHandle | str, **kwargs: Any) -> None:
         sandbox_handle = self._resolve_handle(handle)
@@ -144,7 +216,7 @@ class DockerSandboxBackend(SandboxBackend):
     ) -> AdapterEndpoint:
         sandbox_handle = self._resolve_handle(handle)
         base_url = str(sandbox_handle.metadata["base_url"])
-        return AdapterEndpoint(base_url=base_url, health_url=f"{base_url}/v1/ping")
+        return AdapterEndpoint(base_url=base_url, health_url=f"{base_url}/ping")
 
     def cleanup(self, handle: SandboxHandle | str, **kwargs: Any) -> None:
         sandbox_handle = self._resolve_handle(handle)

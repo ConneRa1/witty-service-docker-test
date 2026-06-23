@@ -904,6 +904,14 @@ class AgentManager:
         finally:
             await adaptor_client.close()
 
+        # 如果agent 已在沙箱内运行，无需再次调用 /agent/start 和创建 session
+        if sandbox_handle.metadata.get("reconnected"):
+            logger.info(
+                f"{prefix}Sandbox was reconnected (container survived restart), "
+                "skipping /agent/start and session creation"
+            )
+            return self._repository.update_agent_status(agent_id, AgentStatus.running)
+
         # 4. 调用 /agent/start（增加超时时间到180秒，因为可能需要加载模型）
         adaptor_client = self._get_adaptor_http_client(agent_id)
         remote_runtime_agent_id: str | None = None
@@ -1805,8 +1813,7 @@ class AgentManager:
         if agent.status not in {AgentStatus.running, AgentStatus.paused}:
             return agent
 
-        # 只对 local_process 类型进行检查
-        if agent.sandbox_type != "local_process":
+        if agent.sandbox_type not in ("local_process", "docker"):
             return agent
 
         # 如果正在恢复中，跳过健康检查（避免恢复过程中状态被修改）

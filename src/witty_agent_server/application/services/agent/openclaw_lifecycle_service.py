@@ -1,6 +1,13 @@
 from collections.abc import Callable, Sequence
 import json
-from subprocess import CompletedProcess, run
+import logging
+import socket
+import subprocess
+import time
+from subprocess import CompletedProcess, Popen, run
+
+
+logger = logging.getLogger(__name__)
 
 
 CommandRunner = Callable[[list[str]], CompletedProcess[str]]
@@ -150,6 +157,7 @@ class OpenClawLifecycleService:
         self._runner: CommandRunner = runner or self._default_runner
         self._profile = profile
         self._gateway_port = gateway_port
+        self._gateway_process: Popen[str] | None = None
 
     def update_config(
         self,
@@ -178,11 +186,95 @@ class OpenClawLifecycleService:
         if not self._profile:
             return
         self._run_or_raise(action="stop")
+        self._stop_gateway_process()
 
     def start(self) -> None:
         raise NotImplementedError(
             "start() method is deprecated. Use onboard() instead."
         )
+
+    def start_gateway(self) -> None:
+        if not self._profile or not self._gateway_port:
+            raise OpenClawLifecycleError(
+                action="gateway run",
+                command=[],
+                returncode=-1,
+                stdout="",
+                stderr="profile and gateway_port are required",
+                message="profile and gateway_port are required for gateway run",
+            )
+
+        self._stop_gateway_process()
+
+        command = self._build_base_command() + [
+            "gateway",
+            "run",
+            "--port",
+            str(self._gateway_port),
+            "--bind",
+            "loopback",
+        ]
+        logger.info("Starting gateway in background: %s", command)
+        self._gateway_process = subprocess.Popen(
+            command,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            if self._gateway_process.poll() is not None:
+                _, stderr = self._gateway_process.communicate()
+                raise OpenClawLifecycleError(
+                    action="gateway run",
+                    command=command,
+                    returncode=self._gateway_process.returncode or -1,
+                    stdout="",
+                    stderr=stderr or "",
+                    message="gateway process exited prematurely",
+                )
+            if self._port_is_listening(self._gateway_port):
+                logger.info("Gateway started successfully on port %s", self._gateway_port)
+                return
+            time.sleep(1)
+
+        raise OpenClawLifecycleError(
+            action="gateway run",
+            command=command,
+            returncode=-1,
+            stdout="",
+            stderr="",
+            message="gateway start timed out after 30 seconds",
+        )
+
+    def _stop_gateway_process(self) -> None:
+        if self._gateway_process is None:
+            return
+        try:
+            self._gateway_process.terminate()
+            self._gateway_process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+        except Exception:
+            logger.exception("Failed to terminate gateway process")
+
+        if self._gateway_process.poll() is None:
+            try:
+                self._gateway_process.kill()
+                self._gateway_process.wait()
+            except Exception:
+                logger.exception("Failed to kill gateway process, giving up")
+
+        self._gateway_process = None
+
+    @staticmethod
+    def _port_is_listening(port: int) -> bool:
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=1):
+                return True
+        except (OSError, ConnectionRefusedError):
+            return False
 
     def mcp_set(self, name: str, config: dict[str, object]) -> None:
         if not self._profile:
@@ -236,6 +328,7 @@ class OpenClawLifecycleService:
         skip_channels: bool = True,
         skip_search: bool = True,
         skip_hooks: bool = True,
+        skip_health: bool = False,
     ) -> None:
         if not self._profile:
             raise OpenClawLifecycleError(
@@ -266,6 +359,8 @@ class OpenClawLifecycleService:
             command.append("--skip-search")
         if skip_hooks:
             command.append("--skip-hooks")
+        if skip_health:
+            command.append("--skip-health")
 
         result = self._run_command(command)
         if result.returncode != 0:
