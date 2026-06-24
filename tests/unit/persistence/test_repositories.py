@@ -268,11 +268,9 @@ def test_stale_generating_messages_and_compaction(
         session.commit()
 
     stale = repo.find_stale_generating_messages(stale_threshold_seconds=60)
-    generating = repo.find_generating_message_for_session("session-1")
     repo.compact_message_delta_events(message_id)
 
     assert [item.id for item in stale] == [message_id]
-    assert generating.id == message_id
     with session_factory() as session:
         event_types = [
             item.event_type

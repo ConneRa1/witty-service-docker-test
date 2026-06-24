@@ -132,6 +132,15 @@ class DockerSettings:
         WITTY_DOCKER_STOP_TIMEOUT: 容器停止超时时间(秒), 默认 10
         WITTY_DOCKER_IMAGE: Docker 镜像名称, 默认 witty-agent-server
         WITTY_DOCKER_IMAGE_TAG: Docker 镜像标签, 默认 latest
+
+        # 资源管控
+        WITTY_DOCKER_MEMORY_LIMIT: 容器内存硬限制, 默认 512m
+        WITTY_DOCKER_PIDS_LIMIT: 容器内最大进程数, 默认 100
+        WITTY_DOCKER_CPU_SHARES: CPU 相对权重, 默认 512
+        WITTY_DOCKER_NOFILE_SOFT_LIMIT: 文件描述符软限制, 默认 1024
+        WITTY_DOCKER_NOFILE_HARD_LIMIT: 文件描述符硬限制, 默认 4096
+        WITTY_DOCKER_TMPFS_SIZE: /tmp tmpfs 大小, 默认 256M
+        WITTY_DOCKER_READ_ONLY: 根文件系统只读, 默认 true
     """
     host: str = "127.0.0.1"
     container_port: int = 8080
@@ -139,6 +148,13 @@ class DockerSettings:
     stop_timeout: int = 10
     image: str = "witty-agent-server"
     image_tag: str = "latest"
+    memory_limit: str = "512m"
+    pids_limit: int = 100
+    cpu_shares: int = 512
+    nofile_soft_limit: int = 1024
+    nofile_hard_limit: int = 4096
+    tmpfs_size: str = "256M"
+    read_only: bool = True
 
     @classmethod
     def from_env(cls) -> "DockerSettings":
@@ -149,6 +165,13 @@ class DockerSettings:
             stop_timeout=int(os.getenv("WITTY_DOCKER_STOP_TIMEOUT", 10)),
             image=os.getenv("WITTY_DOCKER_IMAGE", "witty-agent-server"),
             image_tag=os.getenv("WITTY_DOCKER_IMAGE_TAG", "latest"),
+            memory_limit=os.getenv("WITTY_DOCKER_MEMORY_LIMIT", "512m"),
+            pids_limit=int(os.getenv("WITTY_DOCKER_PIDS_LIMIT", "100")),
+            cpu_shares=int(os.getenv("WITTY_DOCKER_CPU_SHARES", "512")),
+            nofile_soft_limit=int(os.getenv("WITTY_DOCKER_NOFILE_SOFT_LIMIT", "1024")),
+            nofile_hard_limit=int(os.getenv("WITTY_DOCKER_NOFILE_HARD_LIMIT", "4096")),
+            tmpfs_size=os.getenv("WITTY_DOCKER_TMPFS_SIZE", "256M"),
+            read_only=os.getenv("WITTY_DOCKER_READ_ONLY", "true").lower() not in ("0", "false", "no"),
         )
 
     def get_full_image_name(self) -> str:

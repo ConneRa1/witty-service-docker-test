@@ -126,6 +126,7 @@ def test_docker_runtime_start_mounts_workspace_to_witty_workspace(
             "image": "witty-agent:test",
             "name": "witty-sandbox-agent-1",
             "detach": True,
+            "user": "witty",
             "ports": {"8080/tcp": 18080},
             "volumes": {
                 workspace_path: {
@@ -134,6 +135,20 @@ def test_docker_runtime_start_mounts_workspace_to_witty_workspace(
                 }
             },
             "environment": {},
+            "cap_drop": ["ALL"],
+            "security_opt": ["no-new-privileges:true"],
+            "mem_limit": "512m",
+            "pids_limit": 100,
+            "cpu_shares": 512,
+            "read_only": True,
+            "tmpfs": {
+                "/tmp": "rw,noexec,nosuid,size=256M",
+                "/home/witty": "rw,nosuid,uid=1000,gid=1000,mode=0755,size=256M",
+            },
+            "ulimits": [
+                {"name": "nofile", "soft": 1024, "hard": 4096},
+                {"name": "nproc", "soft": 100, "hard": 100},
+            ],
         }
     ]
     assert handle.workspace_path == workspace_path
@@ -294,8 +309,8 @@ def test_docker_runtime_cleanup_attempts_remove_when_stop_fails(
     assert exc_info.value.code == "SANDBOX_STOP_FAILED"
     assert container.stop_called is True
     assert container.remove_called is True
-    assert handle.sandbox_id in backend._handles
-    assert handle.sandbox_id in backend._containers
+    assert handle.sandbox_id not in backend._handles
+    assert handle.sandbox_id not in backend._containers
 
 
 def test_docker_runtime_cleanup_when_remove_fails(
@@ -317,8 +332,8 @@ def test_docker_runtime_cleanup_when_remove_fails(
     assert exc_info.value.code == "SANDBOX_STOP_FAILED"
     assert container.stop_called is True
     assert container.remove_called is True
-    assert handle.sandbox_id in backend._handles
-    assert handle.sandbox_id in backend._containers
+    assert handle.sandbox_id not in backend._handles
+    assert handle.sandbox_id not in backend._containers
 
 
 def test_docker_runtime_cleanup_silent_when_no_container(
