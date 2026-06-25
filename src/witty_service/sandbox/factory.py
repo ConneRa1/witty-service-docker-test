@@ -22,6 +22,13 @@ def _create_docker_backend() -> DockerSandboxBackend:
         container_port=settings.docker.container_port,
         container_workspace_path=settings.docker.container_workspace_path,
         stop_timeout=settings.docker.stop_timeout,
+        memory_limit=settings.docker.memory_limit,
+        pids_limit=settings.docker.pids_limit,
+        cpu_shares=settings.docker.cpu_shares,
+        nofile_soft_limit=settings.docker.nofile_soft_limit,
+        nofile_hard_limit=settings.docker.nofile_hard_limit,
+        tmpfs_size=settings.docker.tmpfs_size,
+        read_only=settings.docker.read_only,
     )
 
 

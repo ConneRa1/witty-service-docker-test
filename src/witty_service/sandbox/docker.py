@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+import logging
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -15,6 +16,8 @@ from witty_service.sandbox.base import (
     sandbox_stop_failed,
 )
 from witty_service.sandbox.local_process import find_free_port
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_DOCKER_IMAGE = "witty-agent-server:latest"
 DEFAULT_CONTAINER_PORT = 8080
@@ -38,6 +41,13 @@ class DockerSandboxBackend(SandboxBackend):
         container_workspace_path: str = DEFAULT_CONTAINER_WORKSPACE_PATH,
         workspace_mount_path: str | None = None,
         stop_timeout: int = 10,
+        memory_limit: str = "512m",
+        pids_limit: int = 100,
+        cpu_shares: int = 512,
+        nofile_soft_limit: int = 1024,
+        nofile_hard_limit: int = 4096,
+        tmpfs_size: str = "256M",
+        read_only: bool = True,
     ) -> None:
         self._client = client
         self._client_factory = client_factory or _create_default_client
@@ -49,6 +59,13 @@ class DockerSandboxBackend(SandboxBackend):
         )
         self.workspace_mount_path = self.container_workspace_path
         self.stop_timeout = stop_timeout
+        self.memory_limit = memory_limit
+        self.pids_limit = pids_limit
+        self.cpu_shares = cpu_shares
+        self.nofile_soft_limit = nofile_soft_limit
+        self.nofile_hard_limit = nofile_hard_limit
+        self.tmpfs_size = tmpfs_size
+        self.read_only = read_only
         self._handles: dict[str, SandboxHandle] = {}
         self._containers: dict[str, Any] = {}
 
@@ -88,14 +105,29 @@ class DockerSandboxBackend(SandboxBackend):
                 self.image,
                 name=container_name,
                 detach=True,
+                user="witty",
                 ports={f"{self.container_port}/tcp": host_port},
                 volumes={
                     resolved_workspace_path: {
                         "bind": self.container_workspace_path,
                         "mode": "rw",
-                    }
+                    },
                 },
                 environment=environment,
+                cap_drop=["ALL"],
+                security_opt=["no-new-privileges:true"],
+                mem_limit=self.memory_limit,
+                pids_limit=self.pids_limit,
+                cpu_shares=self.cpu_shares,
+                read_only=self.read_only,
+                tmpfs={
+                    "/tmp": f"rw,noexec,nosuid,size={self.tmpfs_size}",
+                    "/home/witty": f"rw,nosuid,uid=1000,gid=1000,mode=0755,size={self.tmpfs_size}",
+                },
+                ulimits=[
+                    {"name": "nofile", "soft": self.nofile_soft_limit, "hard": self.nofile_hard_limit},
+                    {"name": "nproc", "soft": self.pids_limit, "hard": self.pids_limit},
+                ],
             )
         except Exception as exc:
             raise sandbox_start_failed(
@@ -209,7 +241,17 @@ class DockerSandboxBackend(SandboxBackend):
                 container=container,
                 error=exc,
             ) from exc
-        return _map_container_status(getattr(container, "status", "unknown"))
+
+        raw_status = getattr(container, "status", "unknown")
+        if raw_status == "exited":
+            state = container.attrs.get("State", {}) if hasattr(container, "attrs") else {}
+            if state.get("OOMKilled", False):
+                logger.warning(
+                    "Container %s was killed by OOM killer (exit_code=%s)",
+                    self._container_id(container),
+                    state.get("ExitCode", "unknown"),
+                )
+        return _map_container_status(raw_status)
 
     def endpoint(
         self, handle: SandboxHandle | str, **kwargs: Any
@@ -232,6 +274,8 @@ class DockerSandboxBackend(SandboxBackend):
                 container.remove(force=bool(kwargs.get("force", False)))
             except Exception as exc:
                 remove_error = exc
+        self._containers.pop(sandbox_handle.sandbox_id, None)
+        self._handles.pop(sandbox_handle.sandbox_id, None)
         if stop_error or remove_error:
             raise self._sandbox_operation_failed(
                 operation="cleanup",
@@ -243,8 +287,6 @@ class DockerSandboxBackend(SandboxBackend):
                     "remove_error": str(remove_error) if remove_error else None,
                 },
             )
-        self._containers.pop(sandbox_handle.sandbox_id, None)
-        self._handles.pop(sandbox_handle.sandbox_id, None)
 
     def _get_client(self) -> Any:
         if self._client is None:

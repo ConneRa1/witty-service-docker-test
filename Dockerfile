@@ -1,17 +1,16 @@
+# -------------------- Stage 0: Node.js 依赖层--------------------
+FROM node:22.22.2-slim AS node
+
 # -------------------- Stage 1: Runtime 依赖层 --------------------
 FROM python:3.11-slim AS runtime-deps
 
-ENV NODE_VERSION=22.22.2
+COPY --from=node /usr/local/ /usr/local/
+
 ENV OPENCLAW_VERSION=2026.6.5
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl xz-utils git \
-    && rm -rf /var/lib/apt/lists/*
-
-RUN curl -fsSL https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz \
-        -o /tmp/node.tar.xz \
-    && tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1 \
-    && rm /tmp/node.tar.xz \
+    && apt-get install -y --no-install-recommends curl git \
+    && rm -rf /var/lib/apt/lists/* \
     && npm install -g openclaw@${OPENCLAW_VERSION} \
     && npm cache clean --force
 
@@ -38,11 +37,17 @@ FROM python-deps AS final
 
 WORKDIR /app
 
-RUN useradd -m -s /bin/bash witty \
+ENV PYTHONDONTWRITEBYTECODE=1
+
+RUN useradd -u 1000 -m -s /bin/bash witty \
+    && chown witty:witty /home/witty \
+    && chmod 755 /home/witty \
     && mkdir -p ~/.witty/logs ~/.witty/db \
     && chown -R witty:witty /app ~/.witty \
-    && find /usr/local/lib/python3.11 -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true \
-    && find /usr/local/lib/python3.11 -type d -name tests -exec rm -rf {} + 2>/dev/null || true
+    && passwd -l witty \
+    && rm -rf /etc/sudoers.d/*  \
+    && find /usr/local/lib/python3.11 -type d -name __pycache__ -exec rm -rf {} +  \
+    && find /usr/local/lib/python3.11 -type d -name tests -exec rm -rf {} + 
 
 USER witty
 
